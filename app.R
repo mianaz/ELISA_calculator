@@ -1,7 +1,6 @@
 # Main Shiny application file for ELISA Standard Curve Calculator v2.0
 library(shiny)
-library(shinydashboard)
-library(shinyBS)
+library(bslib)
 library(DT)
 library(readxl)
 library(readr)
