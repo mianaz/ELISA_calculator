@@ -1,24 +1,14 @@
 # ELISA Model Selection Module
 # Functions for comparing and selecting the best model
 
-# Source dependencies
-source("R/models/model_base.R")
-source("R/models/model_4pl.R")
-source("R/models/model_5pl.R")
-source("R/models/model_linear.R")
-source("R/utils/helpers.R")
-source("R/utils/constants.R")
-
 #' Fit all available models to data
 #'
 #' @param data Data frame with standards data
 #' @param log_transform Whether to use log transformation
 #' @param models_to_fit Character vector of model types to fit (default: c("4PL", "5PL", "Linear"))
-#' @param weights Optional weights vector for weighted regression
 #' @return List of fitted model objects
 fit_all_models <- function(data, log_transform = TRUE,
-                           models_to_fit = c(MODEL_4PL, MODEL_5PL, MODEL_LINEAR),
-                           weights = NULL) {
+                           models_to_fit = c(MODEL_4PL, MODEL_5PL, MODEL_LINEAR)) {
   fitted_models <- list()
 
   # Fit 4PL model if requested
@@ -225,6 +215,18 @@ get_model_equations <- function(fitted_models) {
 #' @param std_range Standard curve range (min, max concentrations)
 #' @return Data frame with predictions for each sample
 predict_with_fallback <- function(sample_responses, fitted_models, best_model_name, std_range) {
+  # Handle empty input gracefully
+  if (length(sample_responses) == 0) {
+    return(data.frame(
+      Response = numeric(0),
+      Predicted_Concentration = numeric(0),
+      Model_Used = character(0),
+      Out_of_Range = logical(0),
+      Error_Message = character(0),
+      stringsAsFactors = FALSE
+    ))
+  }
+
   predictions <- data.frame(
     Response = sample_responses,
     Predicted_Concentration = NA_real_,
@@ -234,8 +236,11 @@ predict_with_fallback <- function(sample_responses, fitted_models, best_model_na
     stringsAsFactors = FALSE
   )
 
-  # Try best model first
-  best_model <- fitted_models[[best_model_name]]
+  # Try best model first (guard against NULL/empty name)
+  best_model <- NULL
+  if (!is.null(best_model_name) && nchar(best_model_name) > 0 && best_model_name %in% names(fitted_models)) {
+    best_model <- fitted_models[[best_model_name]]
+  }
 
   for (i in seq_along(sample_responses)) {
     response <- sample_responses[i]

@@ -1,10 +1,6 @@
 # ELISA Assay Type Detection Module
 # Functions for automatically detecting ELISA assay type based on data patterns
 
-# Source dependencies
-source("R/utils/helpers.R")
-source("R/utils/constants.R")
-
 #' Detect ELISA assay type based on standard curve relationship
 #'
 #' @param standards Standards data frame with Concentration and Response columns

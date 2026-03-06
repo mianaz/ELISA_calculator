@@ -8,6 +8,10 @@ source("R/utils/helpers.R")
 source("R/core/data_validator.R")
 source("R/core/data_processor.R")
 source("R/core/assay_detector.R")
+source("R/models/model_base.R")
+source("R/models/model_4pl.R")
+source("R/models/model_5pl.R")
+source("R/models/model_linear.R")
 source("R/models/model_selector.R")
 source("R/quality/qc_statistics.R")  # New QC module
 source("R/prediction.R")  # Keep original prediction functions for now
@@ -140,7 +144,48 @@ analyze_elisa <- function(
   message("  Standards: ", nrow(standards), " wells, ",
           length(unique(standards[[COL_CONCENTRATION]])), " concentrations")
 
+  # Fallback: if no labeled standards found, try direct fitting from any rows
+  # that have both a valid concentration (> 0) and a valid OD value
+  direct_fit_mode <- FALSE
+  if (nrow(standards) == 0) {
+    message("  WARNING: No rows matched the standard label '", std_label, "'")
+    message("  Attempting direct fitting from rows with valid Concentration and OD...")
+
+    candidate_standards <- data %>%
+      dplyr::mutate(
+        !!COL_CONCENTRATION := suppressWarnings(as.numeric(!!sym(COL_CONCENTRATION))),
+        !!COL_OD := suppressWarnings(as.numeric(!!sym(COL_OD)))
+      ) %>%
+      dplyr::filter(!is.na(!!sym(COL_CONCENTRATION)) & !!sym(COL_CONCENTRATION) > 0 &
+                    !is.na(!!sym(COL_OD)))
+
+    if (nrow(candidate_standards) >= 3) {
+      standards <- candidate_standards
+      direct_fit_mode <- TRUE
+      # Force skip normalization — no B0/NSB context in this mode
+      skip_normalization <- TRUE
+      message("  Found ", nrow(standards), " rows with valid concentration+OD (",
+              length(unique(standards[[COL_CONCENTRATION]])), " unique concentrations)")
+      message("  Using direct OD fitting (normalization skipped)")
+    } else {
+      stop("No standards found and fewer than 3 rows have valid Concentration and OD values. ",
+           "Cannot fit a curve. Check your column mapping and ensure the Standard Label matches your data.")
+    }
+  }
+
   samples <- extract_samples(data, c(nsb_label, b0_label, std_label, blank_label))
+  # In direct-fit mode, samples are everything that wasn't used as a standard
+  if (direct_fit_mode) {
+    # Keep rows that either have no concentration or concentration == 0 as samples
+    samples <- data %>%
+      dplyr::mutate(
+        !!COL_CONCENTRATION := suppressWarnings(as.numeric(!!sym(COL_CONCENTRATION))),
+        !!COL_OD := suppressWarnings(as.numeric(!!sym(COL_OD)))
+      ) %>%
+      dplyr::filter(is.na(!!sym(COL_CONCENTRATION)) | !!sym(COL_CONCENTRATION) == 0) %>%
+      dplyr::filter(!is.na(!!sym(COL_OD)))
+    message("  Samples (unknown concentration): ", nrow(samples), " wells")
+  }
   message("  Samples: ", nrow(samples), " wells")
 
   # STEP 5: Validate B0/NSB and adjust normalization if needed
@@ -163,7 +208,7 @@ analyze_elisa <- function(
   message("  Standard curve range: ", format_concentration_range(std_range[1], std_range[2]))
 
   # STEP 7: Detect assay type
-  message("\n[7/8] Detecting assay type...")
+  message("\n[7/10] Detecting assay type...")
   assay_result <- determine_assay_type(assay_type, standards, config)
   final_assay_type <- assay_result$assay_type
   message("  ", assay_result$detection_result$message)
@@ -184,6 +229,13 @@ analyze_elisa <- function(
   model_selection <- select_best_model(fitted_models, criterion = "aic")
   best_model_name <- model_selection$best_model_name
 
+  # Guard: if no valid models were fitted, stop with a clear message
+
+  if (is.null(best_model_name) || best_model_name == "") {
+    stop("No curve-fitting models could be fitted. Check that your data contains ",
+         "standards with valid concentrations and that the column mapping is correct.")
+  }
+
   # Get model comparison and equations
   model_comparison <- model_selection$comparison
   equations <- get_model_equations(fitted_models)
@@ -198,12 +250,22 @@ analyze_elisa <- function(
   if (calculate_limits && !is.null(model_selection$best_model)) {
     message("\n[9/10] Calculating assay limits (LOD/LOQ/ULOQ)...")
 
-    # Get blank values for LOD/LOQ
-    blank_data <- data %>%
-      filter(Type == blank_label)
-
-    blank_response <- if (nrow(blank_data) > 0 && COL_RESPONSE %in% colnames(blank_data)) {
-      blank_data[[COL_RESPONSE]]
+    # Get blank response values for LOD/LOQ
+    # Use processed standards/samples pipeline: blanks need the same normalization
+    blank_response <- if (COL_RESPONSE %in% colnames(standards)) {
+      # Look for blank-level responses from the processed standards data
+      blank_rows <- data %>% filter(Type == blank_label)
+      if (nrow(blank_rows) > 0) {
+        # Process blank data through the same pipeline as standards
+        blank_processed <- process_standards(blank_rows, controls, skip_normalization, log_transform, config)
+        if (COL_RESPONSE %in% colnames(blank_processed)) {
+          blank_processed[[COL_RESPONSE]]
+        } else {
+          NULL
+        }
+      } else {
+        NULL
+      }
     } else {
       NULL
     }
@@ -297,23 +359,6 @@ analyze_elisa <- function(
   # Calculate sample summaries
   samples_summary <- summarize_samples(samples, std_range)
 
-  # Generate curve data for plotting
-  message("\n=== Generating Visualizations ===")
-  curve_data_list <- generate_all_curves(fitted_models, std_range)
-
-  # Generate plots (using original plotting functions for now)
-  y_axis_label <- if (skip_normalization) "OD (corrected)" else "Normalized OD (B/B0)"
-
-  plots_actual <- create_plots(
-    std_summary, samples_summary$actual, curve_data_list,
-    equations, std_range, y_axis_label, use_capped_data = FALSE
-  )
-
-  plots_capped <- create_plots(
-    std_summary, samples_summary$capped, curve_data_list,
-    equations, std_range, y_axis_label, use_capped_data = TRUE
-  )
-
   message("\n=== Analysis Complete ===\n")
 
   # Generate QC summary
@@ -346,10 +391,6 @@ analyze_elisa <- function(
     assay_limits = assay_limits,
     standards_accuracy = standards_accuracy,
     qc_summary = qc_summary,
-
-    # Plots
-    plots_actual = plots_actual,
-    plots_capped = plots_capped,
 
     # Metadata
     assay_type = final_assay_type,

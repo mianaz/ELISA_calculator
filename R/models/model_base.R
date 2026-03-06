@@ -1,16 +1,7 @@
 # ELISA Model Base Class
 # Base R6 class for all dose-response curve models
 
-# Load required packages
-if (!requireNamespace("R6", quietly = TRUE)) {
-  message("Installing R6 package...")
-  install.packages("R6")
-}
 library(R6)
-
-# Source dependencies
-source("R/utils/helpers.R")
-source("R/utils/constants.R")
 
 #' Base class for ELISA dose-response models
 #'

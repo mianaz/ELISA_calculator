@@ -1,452 +1,5 @@
 # ELISA Plotting Functions
-# Functions for creating plots of ELISA standard curves and samples
-
-#' Generate curve data for plotting
-#'
-#' @param models List of fitted models
-#' @param standards Standards data frame
-#' @param log_transform Whether to log transform concentrations
-#' @param offset Small value for log transformation
-#' @return List of curve data for each model
-generate_curve_data <- function(models, standards, log_transform = TRUE, offset = 1e-5) {
-  # Create a sequence of concentrations for curve plotting
-  min_conc <- min(standards$Concentration[standards$Concentration > 0], na.rm = TRUE) / 10
-  max_conc <- max(standards$Concentration, na.rm = TRUE) * 10
-  conc_seq <- exp(seq(from = log(min_conc), to = log(max_conc), length.out = 100))
-  
-  if(log_transform) {
-    log_conc_seq <- log10(conc_seq)
-  }
-  
-  # Generate curve data for models
-  curve_data_list <- list()
-  
-  # Generate curve data for 4PL model
-  if(!is.null(models$fourpl)) {
-    tryCatch({
-      if(log_transform) {
-        pred_response <- predict(models$fourpl, newdata = data.frame(logConc = log_conc_seq))
-      } else {
-        pred_response <- predict(models$fourpl, newdata = data.frame(Concentration = conc_seq))
-      }
-      curve_data_list$fourpl <- data.frame(Concentration = conc_seq, Response = pred_response, Model = "4PL")
-    }, error = function(e) {
-      # Try manual calculation as fallback
-      tryCatch({
-        params <- coef(models$fourpl)
-        
-        # Identify parameter naming convention
-        if("d:(Intercept)" %in% names(params)) {
-          a <- params["d:(Intercept)"]  # upper asymptote
-          d <- params["c:(Intercept)"]  # lower asymptote
-          c <- params["e:(Intercept)"]  # ED50
-          b <- params["b:(Intercept)"]  # slope
-        } else if("Upper" %in% names(params)) {
-          a <- params["Upper"]
-          d <- params["Lower"]
-          c <- params["ED50"]
-          b <- params["Slope"]
-        } else {
-          stop("Cannot identify parameter names")
-        }
-        
-        # Calculate 4PL curve manually
-        pred_response <- d + (a - d) / (1 + (conc_seq / 10^c)^b)
-        curve_data_list$fourpl <- data.frame(Concentration = conc_seq, Response = pred_response, Model = "4PL")
-      }, error = function(e2) {
-        # Fail silently if manual calculation also fails
-      })
-    })
-  }
-  
-  # Generate curve data for linear model
-  if(!is.null(models$linear)) {
-    tryCatch({
-      if(log_transform) {
-        pred_response <- predict(models$linear, newdata = data.frame(logConc = log_conc_seq))
-      } else {
-        pred_response <- predict(models$linear, newdata = data.frame(Concentration = conc_seq))
-      }
-      curve_data_list$linear <- data.frame(Concentration = conc_seq, Response = pred_response, Model = "Linear")
-    }, error = function(e) {
-      # Fail silently if calculation fails
-    })
-  }
-  
-  return(curve_data_list)
-}
-
-#' Create model equations for plot subtitles
-#'
-#' @param models List of fitted models
-#' @param log_transform Whether to log transform concentrations
-#' @return List of equation strings for each model
-create_model_equations <- function(models, log_transform = TRUE) {
-  equations <- list()
-  
-  # 4PL equation
-  if(!is.null(models$fourpl)) {
-    tryCatch({
-      params <- coef(models$fourpl)
-      
-      # Identify parameter naming convention
-      if("d:(Intercept)" %in% names(params)) {
-        a <- params["d:(Intercept)"]  # upper asymptote
-        d <- params["c:(Intercept)"]  # lower asymptote
-        c <- params["e:(Intercept)"]  # ED50
-        b <- params["b:(Intercept)"]  # slope
-      } else if("Upper" %in% names(params)) {
-        a <- params["Upper"]
-        d <- params["Lower"]
-        c <- params["ED50"]
-        b <- params["Slope"]
-      } else {
-        stop("Cannot identify parameter names")
-      }
-      
-      if(log_transform) {
-        equations$fourpl <- paste0(
-          "y = ", round(d, 3), " + (", round(a, 3), " - ", round(d, 3), 
-          ")/(1 + (10^x/10^", round(c, 3), ")^", round(b, 3), ")"
-        )
-      } else {
-        equations$fourpl <- paste0(
-          "y = ", round(d, 3), " + (", round(a, 3), " - ", round(d, 3), 
-          ")/(1 + (x/", round(c, 3), ")^", round(b, 3), ")"
-        )
-      }
-      
-      # Calculate R-squared for 4PL
-      fitted_values <- fitted(models$fourpl)
-      observed_values <- models$fourpl$data$Response
-      tss <- sum((observed_values - mean(observed_values))^2)
-      rss <- sum((observed_values - fitted_values)^2)
-      r_squared_4pl <- 1 - (rss/tss)
-      
-      equations$fourpl <- paste0(equations$fourpl, ", R² = ", round(r_squared_4pl, 4))
-      
-    }, error = function(e) {
-      equations$fourpl <- "Error generating equation"
-    })
-  }
-  
-  # Linear equation
-  if(!is.null(models$linear)) {
-    tryCatch({
-      coefs <- coef(models$linear)
-      r_squared <- summary(models$linear)$r.squared
-      
-      if(log_transform) {
-        equations$linear <- paste0(
-          "y = ", round(coefs[1], 3), " + ", round(coefs[2], 3), " * log10(x)",
-          ", R² = ", round(r_squared, 4)
-        )
-      } else {
-        equations$linear <- paste0(
-          "y = ", round(coefs[1], 3), " + ", round(coefs[2], 3), " * x",
-          ", R² = ", round(r_squared, 4)
-        )
-      }
-    }, error = function(e) {
-      equations$linear <- "Error generating equation"
-    })
-  }
-  
-  return(equations)
-}
-
-#' Create standard curve plots
-#'
-#' @param std_summary Summarized standards data
-#' @param samples_summary Summarized samples data
-#' @param curve_data_list List of curve data for each model
-#' @param equations Model equations
-#' @param std_range Range of standard concentrations
-#' @param y_axis_label Y-axis label for plots
-#' @param use_capped_data Whether to use capped sample data
-#' @return List of plot objects for different models
-create_plots <- function(std_summary, samples_summary, curve_data_list, equations, 
-                         std_range, y_axis_label, use_capped_data = FALSE) {
-  # Title suffix based on data mode
-  title_suffix <- if(use_capped_data) " (Out-of-Range Values Capped)" else " (Actual Values)"
-  
-  # 1. Combined model plot
-  combined_equation <- paste0(
-    "4PL: ", ifelse(!is.null(equations[[MODEL_4PL]]), equations[[MODEL_4PL]], "Not available"),
-    "\nLinear: ", ifelse(!is.null(equations[[MODEL_LINEAR]]), equations[[MODEL_LINEAR]], "Not available")
-  )
-  
-  p_combined <- ggplot() +
-    # Standard points
-    geom_point(data = std_summary, aes(x = Concentration, y = Mean_Response), 
-               color = "red", size = 3, shape = 16) +
-    # Error bars for standards
-    geom_errorbar(data = std_summary, 
-                  aes(x = Concentration, 
-                      ymin = Mean_Response - SD_Response,
-                      ymax = Mean_Response + SD_Response),
-                  width = 0.1, color = "red", alpha = 0.5)
-  
-  # Add curves for both models
-  if(!is.null(curve_data_list) && length(curve_data_list) > 0) {
-    # Combine all curve data
-    curve_data <- do.call(rbind, curve_data_list)
-    
-    if(nrow(curve_data) > 0) {
-      p_combined <- p_combined + 
-        geom_line(data = curve_data, aes(x = Concentration, y = Response, color = Model, linetype = Model), 
-                  size = 1)
-    }
-  }
-  
-  # Only add samples if we have any (other than blanks)
-  if(nrow(samples_summary) > 0) {
-    p_combined <- p_combined +
-      # Sample points with different shapes
-      geom_point(data = samples_summary, 
-                 aes(x = Mean_Concentration, y = Mean_Response, color = Type, shape = Type), 
-                 size = 3) +
-      # Error bars for samples (horizontal for concentration)
-      geom_errorbarh(data = samples_summary,
-                     aes(y = Mean_Response,
-                         xmin = Mean_Concentration - SD_Concentration,
-                         xmax = Mean_Concentration + SD_Concentration,
-                         color = Type),
-                     height = 0.01, alpha = 0.5) +
-      # Error bars for samples (vertical for response)
-      geom_errorbar(data = samples_summary,
-                    aes(x = Mean_Concentration,
-                        y = Mean_Response,
-                        ymin = Mean_Response - SD_Response,
-                        ymax = Mean_Response + SD_Response,
-                        color = Type),
-                    width = 0.1, alpha = 0.5)
-  }
-  
-  # Create warning text for out-of-range samples if in actual mode
-  caption <- NULL
-  
-  if(!use_capped_data) {
-    # In actual mode, we use warning text for out-of-range values
-    out_of_range_samples <- samples_summary %>%
-      dplyr::filter(Has_Out_of_Range) %>%
-      dplyr::pull(Type) %>%
-      unique()
-    
-    if(length(out_of_range_samples) > 0) {
-      warning_text <- paste("Note: The following samples are outside the standard curve range: ",
-                           paste(out_of_range_samples, collapse=", "))
-      caption <- warning_text
-    }
-  }
-  
-  # Complete the plot
-  p_combined <- p_combined +
-    scale_x_log10(
-      labels = scales::label_number(),
-      breaks = scales::breaks_log(n = 8)
-    ) +
-    labs(
-      title = paste0("ELISA Standard Curve - All Models", title_suffix),
-      subtitle = combined_equation,
-      x = "Concentration (log scale)",
-      y = y_axis_label,
-      caption = caption
-    ) +
-    theme_minimal() +
-    theme(
-      plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
-      plot.subtitle = element_text(hjust = 0.5, size = 9),
-      axis.title = element_text(size = 12),
-      plot.caption = element_text(hjust = 0, color = "red", size = 10),
-      legend.position = "bottom"
-    )
-  
-  # Add markers for standard range
-  p_combined <- p_combined + 
-    geom_vline(xintercept = min(std_summary$Concentration, na.rm = TRUE), 
-               linetype = "dashed", alpha = 0.3) +
-    geom_vline(xintercept = max(std_summary$Concentration, na.rm = TRUE), 
-               linetype = "dashed", alpha = 0.3)
-  
-  # 2. 4PL model plot
-  p_4pl <- NULL
-  if(!is.null(curve_data_list[[MODEL_4PL]])) {
-    p_4pl <- ggplot() +
-      # Standard points
-      geom_point(data = std_summary, aes(x = Concentration, y = Mean_Response), 
-                 color = "red", size = 3, shape = 16) +
-      # Error bars for standards
-      geom_errorbar(data = std_summary, 
-                    aes(x = Concentration, 
-                        ymin = Mean_Response - SD_Response,
-                        ymax = Mean_Response + SD_Response),
-                    width = 0.1, color = "red", alpha = 0.5) +
-      # 4PL curve
-      geom_line(data = curve_data_list[[MODEL_4PL]], aes(x = Concentration, y = Response),
-                color = "blue", size = 1)
-    
-    # Only add samples if we have any
-    if(nrow(samples_summary) > 0) {
-      p_4pl <- p_4pl +
-        # Sample points with different shapes
-        geom_point(data = samples_summary, 
-                   aes(x = Mean_Concentration, y = Mean_Response, color = Type, shape = Type), 
-                   size = 3) +
-        # Error bars for samples
-        geom_errorbarh(data = samples_summary,
-                       aes(y = Mean_Response,
-                           xmin = Mean_Concentration - SD_Concentration,
-                           xmax = Mean_Concentration + SD_Concentration,
-                           color = Type),
-                       height = 0.01, alpha = 0.5) +
-        geom_errorbar(data = samples_summary,
-                      aes(x = Mean_Concentration,
-                          y = Mean_Response,
-                          ymin = Mean_Response - SD_Response,
-                          ymax = Mean_Response + SD_Response,
-                          color = Type),
-                      width = 0.1, alpha = 0.5)
-    }
-    
-    # Create warning text for out-of-range samples if in actual mode
-    caption <- NULL
-    
-    if(!use_capped_data) {
-      # In actual mode, we use warning text for out-of-range values
-      out_of_range_samples <- samples_summary %>%
-        dplyr::filter(Has_Out_of_Range) %>%
-        dplyr::pull(Type) %>%
-        unique()
-      
-      if(length(out_of_range_samples) > 0) {
-        warning_text <- paste("Note: The following samples are outside the 4PL standard curve range: ",
-                             paste(out_of_range_samples, collapse=", "))
-        caption <- warning_text
-      }
-    }
-    
-    p_4pl <- p_4pl +
-      scale_x_log10(
-        labels = scales::label_number(),
-        breaks = scales::breaks_log(n = 8)
-      ) +
-      labs(
-        title = paste0("ELISA Standard Curve - 4PL Model", title_suffix),
-        subtitle = ifelse(!is.null(equations[[MODEL_4PL]]), equations[[MODEL_4PL]], "Equation not available"),
-        x = "Concentration (log scale)",
-        y = y_axis_label,
-        caption = caption
-      ) +
-      theme_minimal() +
-      theme(
-        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
-        plot.subtitle = element_text(hjust = 0.5, size = 10),
-        axis.title = element_text(size = 12),
-        plot.caption = element_text(hjust = 0, color = "red", size = 10),
-        legend.position = "bottom"
-      )
-    
-    # Mark the standard curve range
-    p_4pl <- p_4pl + 
-      geom_vline(xintercept = min(std_summary$Concentration, na.rm = TRUE), 
-                 linetype = "dashed", alpha = 0.3) +
-      geom_vline(xintercept = max(std_summary$Concentration, na.rm = TRUE), 
-                 linetype = "dashed", alpha = 0.3)
-  }
-  
-  # 3. Linear model plot
-  p_linear <- NULL
-  if(!is.null(curve_data_list[[MODEL_LINEAR]])) {
-    p_linear <- ggplot() +
-      # Standard points
-      geom_point(data = std_summary, aes(x = Concentration, y = Mean_Response), 
-                 color = "red", size = 3, shape = 16) +
-      # Error bars for standards
-      geom_errorbar(data = std_summary, 
-                    aes(x = Concentration, 
-                        ymin = Mean_Response - SD_Response,
-                        ymax = Mean_Response + SD_Response),
-                    width = 0.1, color = "red", alpha = 0.5) +
-      # Linear curve
-      geom_line(data = curve_data_list[[MODEL_LINEAR]], aes(x = Concentration, y = Response),
-                color = "green", size = 1)
-    
-    # Only add samples if we have any
-    if(nrow(samples_summary) > 0) {
-      p_linear <- p_linear +
-        # Sample points with different shapes
-        geom_point(data = samples_summary, 
-                   aes(x = Mean_Concentration, y = Mean_Response, color = Type, shape = Type), 
-                   size = 3) +
-        # Error bars for samples
-        geom_errorbarh(data = samples_summary,
-                       aes(y = Mean_Response,
-                           xmin = Mean_Concentration - SD_Concentration,
-                           xmax = Mean_Concentration + SD_Concentration,
-                           color = Type),
-                       height = 0.01, alpha = 0.5) +
-        geom_errorbar(data = samples_summary,
-                      aes(x = Mean_Concentration,
-                          y = Mean_Response,
-                          ymin = Mean_Response - SD_Response,
-                          ymax = Mean_Response + SD_Response,
-                          color = Type),
-                      width = 0.1, alpha = 0.5)
-    }
-    
-    # Create warning text for out-of-range samples if in actual mode
-    caption <- NULL
-    
-    if(!use_capped_data) {
-      # In actual mode, we use warning text for out-of-range values
-      out_of_range_samples <- samples_summary %>%
-        dplyr::filter(Has_Out_of_Range) %>%
-        dplyr::pull(Type) %>%
-        unique()
-      
-      if(length(out_of_range_samples) > 0) {
-        warning_text <- paste("Note: The following samples are outside the Linear standard curve range: ",
-                             paste(out_of_range_samples, collapse=", "))
-        caption <- warning_text
-      }
-    }
-    
-    p_linear <- p_linear +
-      scale_x_log10(
-        labels = scales::label_number(),
-        breaks = scales::breaks_log(n = 8)
-      ) +
-      labs(
-        title = paste0("ELISA Standard Curve - Linear Model", title_suffix),
-        subtitle = ifelse(!is.null(equations[[MODEL_LINEAR]]), equations[[MODEL_LINEAR]], "Equation not available"),
-        x = "Concentration (log scale)",
-        y = y_axis_label,
-        caption = caption
-      ) +
-      theme_minimal() +
-      theme(
-        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
-        plot.subtitle = element_text(hjust = 0.5, size = 10),
-        axis.title = element_text(size = 12),
-        plot.caption = element_text(hjust = 0, color = "red", size = 10),
-        legend.position = "bottom"
-      )
-    
-    # Mark the standard curve range
-    p_linear <- p_linear + 
-      geom_vline(xintercept = min(std_summary$Concentration, na.rm = TRUE), 
-                 linetype = "dashed", alpha = 0.3) +
-      geom_vline(xintercept = max(std_summary$Concentration, na.rm = TRUE), 
-                 linetype = "dashed", alpha = 0.3)
-  }
-  
-  return(list(
-    combined = p_combined,
-    fourpl = p_4pl,
-    linear = p_linear
-  ))
-}
+# Interactive standard curve plot for the Shiny UI
 
 #' Create a unified standard curve plot
 #'
@@ -619,71 +172,124 @@ create_standard_curve_plot <- function(results, model_choice = "combined", show_
     caption <- NULL
   }
   
-  # Create the plot
-  p <- ggplot() +
-    # Plot standards
-    geom_point(data = std_summary, aes(x = Concentration, y = Mean_Response),
-             color = "red", size = 3, shape = 16) +
-    # Error bars for standards
-    geom_errorbar(data = std_summary,
-                aes(x = Concentration,
-                    ymin = Mean_Response - SD_Response,
-                    ymax = Mean_Response + SD_Response),
-                width = 0.1, color = "red", alpha = 0.5)
-  
-  # Add model curves if we have data
-  if(!is.null(curve_data) && nrow(curve_data) > 0) {
-    if(model_choice == "combined") {
-      # For combined models, show both with different colors/styles
-      p <- p +
-        geom_line(data = curve_data,
-                aes(x = x, y = y, color = Model, linetype = Model),
-                size = 1)
+  # Build a unified points data frame for standards + samples with Category column.
+  # This produces one clean plotly legend entry per category.
+
+  # Standards hover text
+  std_points <- std_summary %>%
+    dplyr::mutate(
+      Category = "Standards",
+      x = Concentration,
+      y = Mean_Response,
+      y_lo = Mean_Response - SD_Response,
+      y_hi = Mean_Response + SD_Response,
+      x_lo = NA_real_,
+      x_hi = NA_real_,
+      hover_text = paste0(
+        "Standard\n",
+        "Conc: ", signif(Concentration, 4), "\n",
+        "Response: ", round(Mean_Response, 4), "\n",
+        "SD: ", round(SD_Response, 4), "\n",
+        "N: ", n
+      )
+    ) %>%
+    dplyr::select(Category, x, y, y_lo, y_hi, x_lo, x_hi, hover_text)
+
+  # Sample hover text & categories
+  sample_points <- NULL
+  if (nrow(samples_summary) > 0) {
+    samples_summary <- samples_summary %>%
+      dplyr::mutate(
+        hover_text = paste0(
+          Type, "\n",
+          "Conc: ", signif(Mean_Concentration, 4), "\n",
+          "Response: ", round(Mean_Response, 4), "\n",
+          "N: ", n,
+          ifelse(Is_Unreliable, "\n(Unreliable)", ""),
+          ifelse(Has_Out_of_Range, "\n(Out of range)", "")
+        )
+      )
+
+    if (show_reliability_colors) {
+      samples_summary <- samples_summary %>%
+        dplyr::mutate(Category = ifelse(Is_Unreliable, "Samples (Unreliable)", "Samples (Reliable)"))
     } else {
-      # For single model, use appropriate color
+      samples_summary <- samples_summary %>%
+        dplyr::mutate(Category = "Samples")
+    }
+
+    sample_points <- samples_summary %>%
+      dplyr::mutate(
+        x = Mean_Concentration,
+        y = Mean_Response,
+        y_lo = Mean_Response - SD_Response,
+        y_hi = Mean_Response + SD_Response,
+        x_lo = pmax(Mean_Concentration - SD_Concentration, min_conc),
+        x_hi = Mean_Concentration + SD_Concentration
+      ) %>%
+      dplyr::select(Category, x, y, y_lo, y_hi, x_lo, x_hi, hover_text)
+  }
+
+  # Combine all points
+  all_points <- dplyr::bind_rows(std_points, sample_points)
+
+  # Set factor order so legend is: Standards, Samples (Reliable), Samples (Unreliable)
+  cat_levels <- c("Standards", "Samples", "Samples (Reliable)", "Samples (Unreliable)")
+  all_points$Category <- factor(all_points$Category, levels = cat_levels[cat_levels %in% unique(all_points$Category)])
+
+  # Define colors and shapes per category
+  cat_colors <- c(
+    "Standards"             = "#dc2626",
+    "Samples"               = "#2563eb",
+    "Samples (Reliable)"    = "#2563eb",
+    "Samples (Unreliable)"  = "#eab308"
+  )
+  cat_shapes <- c(
+    "Standards"             = 15,   # square
+    "Samples"               = 16,   # circle
+    "Samples (Reliable)"    = 16,   # circle
+    "Samples (Unreliable)"  = 16    # circle
+  )
+
+  # Build the plot
+  p <- ggplot() +
+    # All data points with unified legend
+    geom_point(data = all_points,
+               aes(x = x, y = y, color = Category, shape = Category, text = hover_text),
+               size = 3) +
+    scale_color_manual(values = cat_colors, name = NULL) +
+    scale_shape_manual(values = cat_shapes, name = NULL) +
+    # Error bars for standards (vertical only)
+    geom_errorbar(data = std_points,
+                  aes(x = x, ymin = y_lo, ymax = y_hi),
+                  width = 0.1, color = "#dc2626", alpha = 0.4)
+
+  # Add model curves
+  if (!is.null(curve_data) && nrow(curve_data) > 0) {
+    if (model_choice == "combined") {
       p <- p +
         geom_line(data = curve_data,
-                aes(x = x, y = y),
-                color = model_color, size = 1)
+                  aes(x = x, y = y, linetype = Model),
+                  color = "#475569", linewidth = 0.8) +
+        scale_linetype_manual(values = c("4PL" = "solid", "5PL" = "longdash", "Linear" = "dotted"),
+                              name = "Model")
+    } else {
+      p <- p +
+        geom_line(data = curve_data,
+                  aes(x = x, y = y),
+                  color = model_color, linewidth = 0.8)
     }
   }
-  
-  # Add samples to plot if any exist
-  if(nrow(samples_summary) > 0) {
-    if(show_reliability_colors) {
-      # Add color-coding for reliability
-      p <- p +
-        # Sample points with reliability coloring and different shapes
-        geom_point(data = samples_summary,
-                 aes(x = Mean_Concentration, y = Mean_Response, 
-                     color = Is_Unreliable, shape = Type),
-                 size = 3) +
-        scale_color_manual(values = c("TRUE" = "red", "FALSE" = "blue"),
-                        name = "Unreliable Value")
-    } else {
-      # Regular coloring by sample type
-      p <- p +
-        # Sample points with different shapes
-        geom_point(data = samples_summary,
-                 aes(x = Mean_Concentration, y = Mean_Response, color = Type, shape = Type),
-                 size = 3)
-    }
-    
-    # Add error bars for all samples
+
+  # Error bars for samples
+  if (!is.null(sample_points) && nrow(sample_points) > 0) {
     p <- p +
-      # Error bars for samples (horizontal for concentration)
-      geom_errorbarh(data = samples_summary,
-                    aes(y = Mean_Response,
-                        xmin = pmax(Mean_Concentration - SD_Concentration, min_conc),
-                        xmax = Mean_Concentration + SD_Concentration),
-                    height = 0.01, alpha = 0.5, color = "gray50") +
-      # Error bars for samples (vertical for response)
-      geom_errorbar(data = samples_summary,
-                  aes(x = Mean_Concentration,
-                      y = Mean_Response,
-                      ymin = Mean_Response - SD_Response,
-                      ymax = Mean_Response + SD_Response),
-                  width = 0.1, alpha = 0.5, color = "gray50")
+      geom_errorbarh(data = sample_points,
+                     aes(y = y, xmin = x_lo, xmax = x_hi),
+                     height = 0.01, alpha = 0.3, color = "gray50") +
+      geom_errorbar(data = sample_points,
+                    aes(x = x, ymin = y_lo, ymax = y_hi),
+                    width = 0.1, alpha = 0.3, color = "gray50")
   }
   
   # Determine subtitle based on model choice
@@ -723,11 +329,41 @@ create_standard_curve_plot <- function(results, model_choice = "combined", show_
              linetype = "dashed", alpha = 0.3)
   
   # Convert to plotly for interactivity
-  p_plotly <- ggplotly(p) %>%
+  p_plotly <- ggplotly(p, tooltip = "text") %>%
     layout(
-      legend = list(orientation = "h", x = 0.5, y = -0.2, xanchor = "center"),
-      margin = list(b = 120)  # Add bottom margin for legend and warning
+      legend = list(
+        orientation = "h",
+        x = 0.5,
+        y = -0.15,
+        xanchor = "center",
+        font = list(size = 12),
+        itemsizing = "constant"
+      ),
+      margin = list(b = 100)
     )
-  
+
+  # Clean up plotly trace names for readable legends
+  seen_groups <- list()
+  for (i in seq_along(p_plotly$x$data)) {
+    trace <- p_plotly$x$data[[i]]
+    raw_name <- trace$name %||% ""
+
+    # Strip ggplotly's parenthesized tuple formats:
+    #   "(value,1)" -> "value"
+    #   "(value,1,NA)" -> "value"
+    #   "(Standards,1,Standards)" -> "Standards"
+    cleaned <- gsub("^\\(([^,]+)(?:,[^)]*)*\\)$", "\\1", raw_name, perl = TRUE)
+
+    p_plotly$x$data[[i]]$name <- cleaned
+    p_plotly$x$data[[i]]$legendgroup <- cleaned
+
+    # Hide duplicate legend entries and unnamed traces (error bars, vlines)
+    if (cleaned == "" || cleaned %in% names(seen_groups)) {
+      p_plotly$x$data[[i]]$showlegend <- FALSE
+    } else {
+      seen_groups[[cleaned]] <- TRUE
+    }
+  }
+
   return(p_plotly)
 }

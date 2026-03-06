@@ -1,10 +1,6 @@
 # ELISA Data Validation Module
 # Functions for validating ELISA data quality and integrity
 
-# Source dependencies
-source("R/utils/helpers.R")
-source("R/utils/constants.R")
-
 #' Validate uploaded ELISA data
 #'
 #' @param data Data frame to validate
