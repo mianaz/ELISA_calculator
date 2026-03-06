@@ -1,11 +1,6 @@
 # ELISA Linear Model
 # R6 class for fitting linear dose-response curves
 
-# Source dependencies
-source("R/models/model_base.R")
-source("R/utils/helpers.R")
-source("R/utils/constants.R")
-
 #' Linear Model for ELISA
 #'
 #' @description
@@ -57,8 +52,11 @@ ElisaLinearModel <- R6Class("ElisaLinearModel",
 
         # Fit linear model using log-transformed concentrations
         tryCatch({
+          # Use weights if available in data
+          wts <- if ("Weights" %in% colnames(clean_data)) clean_data$Weights else NULL
+
           formula <- as.formula(paste(COL_RESPONSE, "~", COL_LOG_CONC))
-          self$fitted_model <- lm(formula, data = clean_data)
+          self$fitted_model <- lm(formula, data = clean_data, weights = wts)
 
           # Extract coefficients
           self$extract_coefficients()
@@ -85,8 +83,11 @@ ElisaLinearModel <- R6Class("ElisaLinearModel",
 
         # Fit linear model using regular concentrations
         tryCatch({
+          # Use weights if available in data
+          wts <- if ("Weights" %in% colnames(clean_data)) clean_data$Weights else NULL
+
           formula <- as.formula(paste(COL_RESPONSE, "~", COL_CONCENTRATION))
-          self$fitted_model <- lm(formula, data = clean_data)
+          self$fitted_model <- lm(formula, data = clean_data, weights = wts)
 
           # Extract coefficients
           self$extract_coefficients()

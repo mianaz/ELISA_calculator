@@ -1,10 +1,6 @@
 # ELISA Data Processing Module
 # Functions for processing, normalizing, and transforming ELISA data
 
-# Source dependencies
-source("R/utils/helpers.R")
-source("R/utils/constants.R")
-
 #' Map user-selected columns to standardized internal names
 #'
 #' @param data Raw data frame

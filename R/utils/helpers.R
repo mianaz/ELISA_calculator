@@ -130,7 +130,7 @@ format_number <- function(x, digits = 3) {
   if (abs(x) < 0.001 || abs(x) > 10000) {
     return(formatC(x, format = "e", digits = digits))
   } else {
-    return(round(x, digits))
+    return(formatC(round(x, digits), format = "f", digits = digits))
   }
 }
 

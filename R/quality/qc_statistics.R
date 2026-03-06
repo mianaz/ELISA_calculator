@@ -1,10 +1,6 @@
 # ELISA Quality Control Statistics Module
 # Functions for LOD/LOQ/ULOQ, recovery, back-calculation, outlier detection, and confidence intervals
 
-# Source dependencies
-source("R/utils/helpers.R")
-source("R/utils/constants.R")
-
 #' Calculate Limit of Detection (LOD)
 #'
 #' @description
@@ -486,7 +482,8 @@ grubbs_test <- function(x, alpha = 0.05) {
 #' Perform Dixon's Q test for outlier detection
 #'
 #' @param x Numeric vector (3-25 observations)
-#' @param alpha Significance level
+#' @param alpha Significance level (currently only 0.05 is supported;
+#'   other values are accepted but use the alpha=0.05 critical value table)
 #' @return List with outlier information
 #' @export
 dixon_q_test <- function(x, alpha = 0.05) {

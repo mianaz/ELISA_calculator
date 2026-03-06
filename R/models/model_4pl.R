@@ -1,13 +1,7 @@
 # ELISA 4-Parameter Logistic (4PL) Model
 # R6 class for fitting 4PL log-logistic dose-response curves
 
-# Load required packages
 library(drc)
-
-# Source dependencies
-source("R/models/model_base.R")
-source("R/utils/helpers.R")
-source("R/utils/constants.R")
 
 #' Four-Parameter Log-Logistic Model for ELISA
 #'
@@ -66,12 +60,16 @@ Elisa4PLModel <- R6Class("Elisa4PLModel",
 
       # Fit model using LL.4 (log-logistic) or L.4 (plain logistic)
       tryCatch({
+        # Use weights if available in data
+        wts <- if ("Weights" %in% colnames(clean_data)) clean_data$Weights else NULL
+
         if (self$log_transform) {
           # Use LL.4() - log-logistic 4-parameter model (standard for dose-response)
           self$fitted_model <- drm(
             as.formula(paste(COL_RESPONSE, "~", COL_CONCENTRATION)),
             data = clean_data,
             fct = LL.4(),
+            weights = wts,
             control = drmc(errorm = FALSE)
           )
         } else {
@@ -80,6 +78,7 @@ Elisa4PLModel <- R6Class("Elisa4PLModel",
             as.formula(paste(COL_RESPONSE, "~", COL_CONCENTRATION)),
             data = clean_data,
             fct = L.4(),
+            weights = wts,
             control = drmc(errorm = FALSE)
           )
         }

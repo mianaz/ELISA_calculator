@@ -1,14 +1,8 @@
 # ELISA 5-Parameter Logistic (5PL) Model
 # R6 class for fitting 5PL log-logistic dose-response curves with asymmetry parameter
 
-# Load required packages
 library(drc)
 library(R6)
-
-# Source dependencies
-source("R/models/model_base.R")
-source("R/utils/helpers.R")
-source("R/utils/constants.R")
 
 #' Five-Parameter Log-Logistic Model for ELISA
 #'
@@ -71,12 +65,16 @@ Elisa5PLModel <- R6Class("Elisa5PLModel",
 
       # Fit model using LL.5 (log-logistic) or L.5 (plain logistic)
       tryCatch({
+        # Use weights if available in data
+        wts <- if ("Weights" %in% colnames(clean_data)) clean_data$Weights else NULL
+
         if (self$log_transform) {
           # Use LL.5() - log-logistic 5-parameter model (standard for dose-response)
           self$fitted_model <- drm(
             as.formula(paste(COL_RESPONSE, "~", COL_CONCENTRATION)),
             data = clean_data,
             fct = LL.5(),
+            weights = wts,
             control = drmc(errorm = FALSE, maxIt = 500)
           )
         } else {
@@ -85,6 +83,7 @@ Elisa5PLModel <- R6Class("Elisa5PLModel",
             as.formula(paste(COL_RESPONSE, "~", COL_CONCENTRATION)),
             data = clean_data,
             fct = L.5(),
+            weights = wts,
             control = drmc(errorm = FALSE, maxIt = 500)
           )
         }

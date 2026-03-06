@@ -1,6 +1,6 @@
 # Main Shiny application file for ELISA Standard Curve Calculator v2.0
 library(shiny)
-library(bslib)
+library(shinythemes)
 library(DT)
 library(readxl)
 library(readr)
@@ -24,9 +24,6 @@ ui <- create_ui()
 
 # Define server logic
 server <- function(input, output, session) {
-  # Define a helper function for NULL handling
-  `%||%` <- function(a, b) if (is.null(a)) b else a
-
   # Reactive values to store analysis results
   results <- reactiveVal(NULL)
   raw_data <- reactiveVal(NULL)
@@ -86,35 +83,54 @@ server <- function(input, output, session) {
     return(ext %in% c("xlsx", "xls"))
   }
 
-  # Debounced version of analysis trigger
-  analysis_trigger <- debounce(reactive({
-    list(
-      file = input$file,
-      sheet = input$sheet,
-      well_col = input$well_col,
-      type_col = input$type_col,
-      conc_col = input$conc_col,
-      od_col = input$od_col,
-      od_corr_col = input$od_corr_col,
-      use_corrected = input$use_corrected,
-      assay_type = input$assay_type,
-      nsb_label = input$nsb_label,
-      b0_label = input$b0_label,
-      std_label = input$std_label,
-      blank_label = input$blank_label,
-      skip_normalization = input$skip_normalization,
-      log_transform = input$log_transform,
-      remove_unlabeled = input$remove_unlabeled,
-      weight_type = input$weight_type,
-      models_to_fit = input$models_to_fit,
-      dilution_factors_text = input$dilution_factors_text,
-      calculate_limits = input$calculate_limits
-    )
-  }), 500)  # 500ms debounce
+  # Helper to find a column by fuzzy matching (case-insensitive, partial match)
+  find_column <- function(column_names, patterns, fallback_index = NULL) {
+    lc_names <- tolower(column_names)
+    for (pat in patterns) {
+      # Exact match first
+      if (pat %in% column_names) return(pat)
+      # Case-insensitive exact match
+      idx <- which(lc_names == tolower(pat))
+      if (length(idx) > 0) return(column_names[idx[1]])
+      # Case-insensitive partial match (column starts with pattern)
+      lc_pat <- tolower(pat)
+      idx <- which(startsWith(lc_names, lc_pat))
+      if (length(idx) > 0) return(column_names[idx[1]])
+      # Check if pattern is contained in any column name
+      idx <- which(grepl(lc_pat, lc_names, fixed = TRUE))
+      if (length(idx) > 0) return(column_names[idx[1]])
+    }
+    # Fallback to positional index
+    if (!is.null(fallback_index) && fallback_index <= length(column_names)) {
+      return(column_names[fallback_index])
+    }
+    return(column_names[1])
+  }
+
+  # Helper to update column dropdowns from a set of column names
+  update_column_dropdowns <- function(session, column_names) {
+    well_sel <- find_column(column_names, c("Well ID", "Well", "WellID", "Well_ID"), 1)
+    type_sel <- find_column(column_names, c("Sample Type", "SampleType", "Sample_Type", "Type"), 2)
+    conc_sel <- find_column(column_names, c("Concentration", "Conc", "Concentration (ng/ml)", "Concentration (pg/ml)"), 3)
+    od_sel   <- find_column(column_names, c("OD", "Absorbance", "Abs"), 4)
+
+    # For corrected OD, try several patterns; default to "None"
+    od_corr_sel <- "None"
+    for (pat in c("OD (corrected)", "OD Corrected", "OD_corrected", "OD_Corrected", "Corrected", "OD_cor")) {
+      match <- grep(pat, column_names, ignore.case = TRUE, fixed = TRUE)
+      if (length(match) > 0) { od_corr_sel <- column_names[match[1]]; break }
+    }
+
+    updateSelectInput(session, "well_col", choices = column_names, selected = well_sel)
+    updateSelectInput(session, "type_col", choices = column_names, selected = type_sel)
+    updateSelectInput(session, "conc_col", choices = column_names, selected = conc_sel)
+    updateSelectInput(session, "od_col",   choices = column_names, selected = od_sel)
+    updateSelectInput(session, "od_corr_col", choices = c("None", column_names), selected = od_corr_sel)
+  }
 
   # Set flags for UI conditional elements
   output$fileUploaded <- reactive({
-    return(!is.null(input$file))
+    return(!is.null(input$file) || !is.null(raw_data()))
   })
   outputOptions(output, "fileUploaded", suspendWhenHidden = FALSE)
 
@@ -122,6 +138,13 @@ server <- function(input, output, session) {
     return(!is.null(results()))
   })
   outputOptions(output, "analysisComplete", suspendWhenHidden = FALSE)
+
+  # Flag for whether uploaded file is Excel (controls sheet selector visibility)
+  output$isExcelFile <- reactive({
+    req(input$file)
+    return(is_excel_file(input$file$name))
+  })
+  outputOptions(output, "isExcelFile", suspendWhenHidden = FALSE)
 
   # Data preview output
   output$rawPreview <- renderDT({
@@ -223,6 +246,9 @@ server <- function(input, output, session) {
         # Final progress
         incProgress(0.2, detail = "Complete")
 
+        # Auto-navigate to Results tab
+        updateNavbarPage(session, "mainNav", selected = "Results")
+
         # Show a success notification with QC status
         qc_status <- if (!is.null(analysis_results$qc_summary)) {
           analysis_results$qc_summary$overall_status
@@ -287,17 +313,8 @@ server <- function(input, output, session) {
         return()
       }
 
-      # Update column selection dropdowns
-      updateSelectInput(session, "well_col", choices = column_names,
-                       selected = if("Well ID" %in% column_names) "Well ID" else column_names[1])
-      updateSelectInput(session, "type_col", choices = column_names,
-                       selected = if("Sample Type" %in% column_names) "Sample Type" else column_names[2])
-      updateSelectInput(session, "conc_col", choices = column_names,
-                       selected = if("Concentration" %in% column_names) "Concentration" else column_names[3])
-      updateSelectInput(session, "od_col", choices = column_names,
-                       selected = if("OD" %in% column_names) "OD" else column_names[4])
-      updateSelectInput(session, "od_corr_col", choices = c("None", column_names),
-                       selected = if("OD (corrected)" %in% column_names) "OD (corrected)" else "None")
+      # Update column selection dropdowns with fuzzy matching
+      update_column_dropdowns(session, column_names)
 
       # Store raw data for preview
       raw_data(first_sheet_data)
@@ -309,6 +326,31 @@ server <- function(input, output, session) {
 
     }, error = function(e) {
       showNotification(paste("Error reading file:", e$message), type = "error", duration = 10)
+    })
+  })
+
+  # Observer for sheet changes — re-read data and update column dropdowns
+  observeEvent(input$sheet, {
+    req(input$file)
+    # Only relevant for Excel files with real sheet names
+    if (!is_excel_file(input$file$name)) return()
+    sheet_name <- input$sheet
+    if (is.null(sheet_name) || sheet_name == "") return()
+
+    tryCatch({
+      sheet_data <- readxl::read_excel(input$file$datapath, sheet = sheet_name)
+      column_names <- colnames(sheet_data)
+
+      # Update column dropdowns for the newly selected sheet
+      update_column_dropdowns(session, column_names)
+
+      # Update raw data preview
+      raw_data(sheet_data)
+
+      message("Sheet changed to '", sheet_name, "': ", nrow(sheet_data), " rows, ",
+              ncol(sheet_data), " columns")
+    }, error = function(e) {
+      showNotification(paste("Error reading sheet:", e$message), type = "error", duration = 5)
     })
   })
 
@@ -333,17 +375,8 @@ server <- function(input, output, session) {
       # Update sheet selection (CSV has no sheets)
       updateSelectInput(session, "sheet", choices = c("Data"), selected = "Data")
 
-      # Update column selections
-      updateSelectInput(session, "well_col", choices = column_names,
-                       selected = if("Well ID" %in% column_names) "Well ID" else column_names[1])
-      updateSelectInput(session, "type_col", choices = column_names,
-                       selected = if("Sample Type" %in% column_names) "Sample Type" else column_names[2])
-      updateSelectInput(session, "conc_col", choices = column_names,
-                       selected = if("Concentration" %in% column_names) "Concentration" else column_names[3])
-      updateSelectInput(session, "od_col", choices = column_names,
-                       selected = if("OD" %in% column_names) "OD" else column_names[4])
-      updateSelectInput(session, "od_corr_col", choices = c("None", column_names),
-                       selected = if("OD (corrected)" %in% column_names) "OD (corrected)" else "None")
+      # Update column selections with fuzzy matching
+      update_column_dropdowns(session, column_names)
 
       # Run analysis with the example data
       withProgress(message = paste("Loading", example_name, "..."), value = 0, {
@@ -389,6 +422,9 @@ server <- function(input, output, session) {
         # Store results
         results(analysis_results)
 
+        # Auto-navigate to Results tab
+        updateNavbarPage(session, "mainNav", selected = "Results")
+
         # Show success notification
         qc_status <- if (!is.null(analysis_results$qc_summary)) {
           analysis_results$qc_summary$overall_status
@@ -417,59 +453,6 @@ server <- function(input, output, session) {
     load_example_data("sandwich_elisa_IL6.csv", "Sandwich ELISA (IL-6)")
   })
 
-  # Observer for debounced analysis parameters (auto re-analyze)
-  observeEvent(analysis_trigger(), {
-    # Only run if a file has been uploaded and sheet is selected
-    req(input$file)
-    req(input$sheet)
-
-    # Parse dilution factors
-    dilution_factors <- parse_dilution_factors(input$dilution_factors_text)
-
-    # Get models to fit
-    models <- input$models_to_fit
-    if (is.null(models) || length(models) == 0) {
-      models <- c("4PL", "Linear")
-    }
-
-    # Re-analyze with updated parameters
-    tryCatch({
-      analysis_results <- analyze_elisa(
-        file_path = input$file$datapath,
-        sheet_name = input$sheet,
-        file_name = input$file$name,
-        well_col = input$well_col,
-        type_col = input$type_col,
-        conc_col = input$conc_col,
-        od_col = input$od_col,
-        od_corr_col = if(input$od_corr_col == "None") input$od_col else input$od_corr_col,
-        use_corrected = input$use_corrected %||% FALSE,
-        assay_type = input$assay_type %||% "auto",
-        nsb_label = input$nsb_label %||% "NSB",
-        b0_label = input$b0_label %||% "B0",
-        std_label = input$std_label %||% "Standard",
-        blank_label = input$blank_label %||% "Blank",
-        skip_normalization = input$skip_normalization %||% FALSE,
-        log_transform = input$log_transform %||% TRUE,
-        remove_unlabeled = input$remove_unlabeled %||% TRUE,
-        dilution_factors = dilution_factors,
-        weight_type = input$weight_type %||% "none",
-        models_to_fit = models,
-        calculate_limits = input$calculate_limits %||% TRUE
-      )
-
-      # Store updated results
-      results(analysis_results)
-    }, error = function(e) {
-      # Display error to user but keep app running
-      showNotification(
-        paste("Error in analysis:", e$message),
-        type = "error",
-        duration = 10
-      )
-    })
-  }, ignoreInit = TRUE)
-  
   # Reactive for filtered results based on toggle
   filtered_results <- reactive({
     # Check if results exist, if not return NULL
@@ -712,6 +695,106 @@ server <- function(input, output, session) {
     }
   )
   
+  # Data summary banner after upload
+  output$dataSummaryInfo <- renderUI({
+    req(raw_data())
+    data <- raw_data()
+    type_col <- input$type_col
+
+    # Count sample types if the type column exists
+    if (!is.null(type_col) && type_col %in% colnames(data)) {
+      type_counts <- table(data[[type_col]])
+      std_label <- input$std_label %||% "Standard"
+      blank_label <- input$blank_label %||% "Blank"
+      nsb_label <- input$nsb_label %||% "NSB"
+      b0_label <- input$b0_label %||% "B0"
+
+      n_standards <- sum(type_counts[names(type_counts) == std_label], na.rm = TRUE)
+      n_blanks <- sum(type_counts[names(type_counts) == blank_label], na.rm = TRUE)
+      n_controls <- sum(type_counts[names(type_counts) %in% c(nsb_label, b0_label)], na.rm = TRUE)
+      n_samples <- nrow(data) - n_standards - n_blanks - n_controls
+
+      div(class = "alert alert-info",
+        icon("info-circle"),
+        strong(paste(nrow(data), "rows loaded")), " — ",
+        span(class = "label label-primary", paste(n_standards, "Standards")), " ",
+        span(class = "label label-success", paste(n_samples, "Samples")), " ",
+        if (n_controls > 0) span(class = "label label-info", paste(n_controls, "Controls")), " ",
+        if (n_blanks > 0) span(class = "label label-default", paste(n_blanks, "Blanks"))
+      )
+    } else {
+      div(class = "alert alert-info",
+        icon("info-circle"),
+        strong(paste(nrow(data), "rows,", ncol(data), "columns loaded"))
+      )
+    }
+  })
+
+  # Cleaned data preview
+  output$cleanedPreview <- renderDT({
+    req(raw_data())
+    data <- raw_data()
+
+    type_col <- input$type_col
+    remove_unlabeled <- input$remove_unlabeled %||% TRUE
+
+    if (remove_unlabeled && !is.null(type_col) && type_col %in% colnames(data)) {
+      cleaned <- data %>% dplyr::filter(!is.na(.data[[type_col]]) & .data[[type_col]] != "")
+      removed_count <- nrow(data) - nrow(cleaned)
+    } else {
+      cleaned <- data
+      removed_count <- 0
+    }
+
+    DT::datatable(
+      cleaned,
+      options = list(pageLength = 10, scrollX = TRUE, dom = 'tp'),
+      rownames = FALSE,
+      caption = if (removed_count > 0) {
+        htmltools::tags$caption(
+          style = "caption-side: top; color: #64748b; font-size: 0.85rem;",
+          paste0(removed_count, " unlabeled row(s) removed. Showing ", nrow(cleaned), " of ", nrow(data), " rows.")
+        )
+      }
+    )
+  })
+
+  # Analysis metadata banner in Results tab
+  output$analysisMetadata <- renderUI({
+    req(results())
+    res <- results()
+
+    assay_type <- res$assay_type %||% "Unknown"
+    best_model <- res$best_model_name %||% "N/A"
+    normalization <- if (isTRUE(res$skip_normalization)) "Skipped" else "B0/NSB"
+    weighting <- res$weight_type %||% "none"
+
+    div(class = "alert alert-success",
+      icon("check-circle"),
+      strong("Analysis Complete"), " — ",
+      span(class = "label label-primary", paste("Assay:", assay_type)), " ",
+      span(class = "label label-success", paste("Best Model:", best_model)), " ",
+      span(class = "label label-info", paste("Normalization:", normalization)), " ",
+      if (weighting != "none") span(class = "label label-warning", paste("Weight:", weighting))
+    )
+  })
+
+  # New Analysis reset button
+  observeEvent(input$resetAnalysis, {
+    results(NULL)
+    raw_data(NULL)
+    # Reset file input via JS (shinyjs not available)
+    session$sendCustomMessage("resetFileInput", "file")
+    updateSelectInput(session, "sheet", choices = character(0))
+    updateSelectInput(session, "well_col", choices = character(0))
+    updateSelectInput(session, "type_col", choices = character(0))
+    updateSelectInput(session, "conc_col", choices = character(0))
+    updateSelectInput(session, "od_col", choices = character(0))
+    updateSelectInput(session, "od_corr_col", choices = character(0))
+    updateNavbarPage(session, "mainNav", selected = "Upload & Analyze")
+    showNotification("Analysis reset. Ready for new data.", type = "message", duration = 3)
+  })
+
   # Sheet names are handled in the file upload observer
 
   # Model comparison table
@@ -762,6 +845,60 @@ server <- function(input, output, session) {
   output$downloadStandards <- downloadHandler(
     filename = function() {
       paste0(input$downloadPrefix, "_Standards_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".xlsx")
+    },
+    content = function(file) {
+      req(filtered_results())
+      writexl::write_xlsx(filtered_results()$standards, file)
+    }
+  )
+
+  # Duplicate download handlers for Results tab quick download buttons
+  output$downloadAllFiles2 <- downloadHandler(
+    filename = function() {
+      paste0(input$downloadPrefix %||% "ELISA_Results", "_AllResults_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".zip")
+    },
+    content = function(file) {
+      req(filtered_results())
+      temp_dir <- tempdir()
+      excel_file <- file.path(temp_dir, "ELISA_Results_AllData.xlsx")
+      data_list <- list(
+        "Standards" = filtered_results()$standards,
+        "Samples" = filtered_results()$samples,
+        "Sample Summary" = filtered_results()$sample_summary,
+        "Model Comparison" = filtered_results()$model_comparison
+      )
+      if (!is.null(filtered_results()$standards_accuracy)) {
+        data_list[["Standards Accuracy"]] <- filtered_results()$standards_accuracy
+      }
+      writexl::write_xlsx(data_list, excel_file)
+      zip(file, files = excel_file, flags = "-j")
+    },
+    contentType = "application/zip"
+  )
+
+  output$downloadSampleSummary2 <- downloadHandler(
+    filename = function() {
+      paste0(input$downloadPrefix %||% "ELISA_Results", "_SampleSummary_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".xlsx")
+    },
+    content = function(file) {
+      req(filtered_results())
+      writexl::write_xlsx(filtered_results()$sample_summary, file)
+    }
+  )
+
+  output$downloadSamples2 <- downloadHandler(
+    filename = function() {
+      paste0(input$downloadPrefix %||% "ELISA_Results", "_Samples_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".xlsx")
+    },
+    content = function(file) {
+      req(filtered_results())
+      writexl::write_xlsx(filtered_results()$samples, file)
+    }
+  )
+
+  output$downloadStandards2 <- downloadHandler(
+    filename = function() {
+      paste0(input$downloadPrefix %||% "ELISA_Results", "_Standards_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".xlsx")
     },
     content = function(file) {
       req(filtered_results())
@@ -825,6 +962,68 @@ server <- function(input, output, session) {
       }
     }
 
+    # Process sample data for plotting
+    min_conc_plot <- min(std_summary$Concentration[std_summary$Concentration > 0], na.rm = TRUE)
+    samples_summary <- samples_data %>%
+      dplyr::filter(!is.na(Response)) %>%
+      dplyr::group_by(Type) %>%
+      dplyr::summarize(
+        Mean_Response = mean(Response, na.rm = TRUE),
+        SD_Response = sd(Response, na.rm = TRUE),
+        Mean_Concentration = mean(Capped_Concentration, na.rm = TRUE),
+        SD_Concentration = sd(Capped_Concentration, na.rm = TRUE),
+        Has_Out_of_Range = any(Out_of_Range, na.rm = TRUE),
+        Has_Uncalculatable = any(Model_Used == "Uncalculatable", na.rm = TRUE),
+        Is_Unreliable = any(Is_Unreliable, na.rm = TRUE),
+        n = n(),
+        .groups = "drop"
+      ) %>%
+      dplyr::filter(!Type %in% c("NSB", "B0", "Standard", "Blank"))
+
+    # Build warning captions
+    warning_messages <- character(0)
+    out_of_range_samples <- samples_data %>%
+      dplyr::filter(Out_of_Range == TRUE) %>%
+      dplyr::pull(Type) %>%
+      unique()
+    if (length(out_of_range_samples) > 0) {
+      warning_messages <- c(warning_messages,
+        paste("Note: Outside standard curve range:",
+              paste(out_of_range_samples, collapse = ", ")))
+    }
+    uncalculatable_samples <- samples_data %>%
+      dplyr::filter(Model_Used == "Uncalculatable") %>%
+      dplyr::pull(Type) %>%
+      unique()
+    if (length(uncalculatable_samples) > 0) {
+      warning_messages <- c(warning_messages,
+        paste("Warning: Estimated values:",
+              paste(uncalculatable_samples, collapse = ", ")))
+    }
+    caption <- if (length(warning_messages) > 0) paste(warning_messages, collapse = "\n") else NULL
+
+    # Add sample points if any exist
+    if (nrow(samples_summary) > 0) {
+      p <- p +
+        geom_point(data = samples_summary,
+                   aes(x = Mean_Concentration, y = Mean_Response,
+                       color = Is_Unreliable, shape = Type),
+                   size = 3) +
+        scale_color_manual(values = c("TRUE" = "red", "FALSE" = "blue"),
+                           name = "Unreliable Value") +
+        geom_errorbarh(data = samples_summary,
+                       aes(y = Mean_Response,
+                           xmin = pmax(Mean_Concentration - SD_Concentration, min_conc_plot / 10),
+                           xmax = Mean_Concentration + SD_Concentration),
+                       height = 0.01, alpha = 0.5, color = "gray50") +
+        geom_errorbar(data = samples_summary,
+                      aes(x = Mean_Concentration,
+                          y = Mean_Response,
+                          ymin = Mean_Response - SD_Response,
+                          ymax = Mean_Response + SD_Response),
+                      width = 0.1, alpha = 0.5, color = "gray50")
+    }
+
     # Add formatting
     p <- p +
       scale_x_log10(labels = scales::label_number(), breaks = scales::breaks_log(n = 8)) +
@@ -832,13 +1031,16 @@ server <- function(input, output, session) {
         title = paste0("ELISA Standard Curve - ", toupper(model_choice)),
         subtitle = paste("Best model:", best_model),
         x = "Concentration (log scale)",
-        y = y_axis_label
+        y = y_axis_label,
+        caption = caption
       ) +
       theme_minimal() +
       theme(
         plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
         plot.subtitle = element_text(hjust = 0.5, size = 10),
-        axis.title = element_text(size = 12)
+        axis.title = element_text(size = 12),
+        plot.caption = element_text(hjust = 0, color = "red", size = 10),
+        legend.position = "bottom"
       ) +
       geom_vline(xintercept = min(std_summary$Concentration, na.rm = TRUE),
                 linetype = "dashed", alpha = 0.3) +
