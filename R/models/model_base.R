@@ -152,7 +152,7 @@ ElisaModel <- R6Class("ElisaModel",
     #'
     #' @return Logical indicating if model is ready for use
     is_valid = function() {
-      self$is_fitted && is.null(self$fit_error)
+      self$is_fitted && is.null(self$fit_error) && !is.null(self$fitted_model)
     },
 
     #' Get summary of model fit

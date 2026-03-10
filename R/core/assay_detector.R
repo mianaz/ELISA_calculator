@@ -177,7 +177,8 @@ determine_assay_type <- function(user_assay_type = ASSAY_TYPE_AUTO, standards, c
 get_assay_type_description <- function(assay_type) {
   descriptions <- list()
   descriptions[[ASSAY_TYPE_COMPETITIVE]] <- "Competitive ELISA (inverse relationship: higher concentration = lower signal)"
-  descriptions[[ASSAY_TYPE_DIRECT]] <- "Direct/Sandwich ELISA (direct relationship: higher concentration = higher signal)"
+  descriptions[[ASSAY_TYPE_DIRECT]] <- "Direct ELISA (direct relationship: higher concentration = higher signal)"
+  descriptions[[ASSAY_TYPE_INDIRECT]] <- "Indirect ELISA (direct relationship: higher concentration = higher signal)"
   descriptions[[ASSAY_TYPE_SANDWICH]] <- "Sandwich ELISA (direct relationship: higher concentration = higher signal)"
   descriptions[[ASSAY_TYPE_AUTO]] <- "Auto-detect assay type based on data pattern"
 
@@ -198,11 +199,10 @@ get_fitting_parameters <- function(assay_type) {
     # Competitive assays have inverse relationship (current behavior)
     params$reverse_response <- FALSE
     params$description <- "Using inverse relationship for competitive ELISA"
-  } else if (assay_type %in% c(ASSAY_TYPE_DIRECT, ASSAY_TYPE_SANDWICH)) {
-    # Direct/sandwich assays may need reversed fitting
-    # For now, we'll keep the same approach but this can be extended
+  } else if (assay_type %in% c(ASSAY_TYPE_DIRECT, ASSAY_TYPE_INDIRECT, ASSAY_TYPE_SANDWICH)) {
+    # Direct/indirect/sandwich assays have positive relationship
     params$reverse_response <- FALSE
-    params$description <- "Using direct relationship for direct/sandwich ELISA"
+    params$description <- paste0("Using direct relationship for ", assay_type, " ELISA")
   }
 
   return(params)

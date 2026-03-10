@@ -1,4 +1,4 @@
-# Main Shiny application file for ELISA Standard Curve Calculator v2.0
+# Main Shiny application file for ELISA Standard Curve Calculator (Beta)
 library(shiny)
 library(shinythemes)
 library(DT)
@@ -17,6 +17,7 @@ library(R6)
 
 # Load modular components
 source("R/ui.R")
+source("R/io/plate_reader_parser.R")  # Plate reader format parser
 source("R/analysis/analyzer.R")  # Generalized analyzer with all dependencies
 
 # Create UI
@@ -27,6 +28,7 @@ server <- function(input, output, session) {
   # Reactive values to store analysis results
   results <- reactiveVal(NULL)
   raw_data <- reactiveVal(NULL)
+  parsed_plate <- reactiveVal(NULL)  # Stores parsed plate grid data from plate reader files
   exclusion_audit_trail <- reactiveVal(list(entries = list(), created_at = Sys.time()))
 
   # Helper function to parse dilution factors from text input
@@ -153,18 +155,46 @@ server <- function(input, output, session) {
     # If no raw data is stored yet, try to read it
     if(is.null(raw_data())) {
       tryCatch({
-        # Use helper function to read data based on file type
-        if (is_excel_file(input$file$name)) {
-          # Excel file - try to read from currently selected sheet
-          sheet_to_use <- if(!is.null(input$sheet)) input$sheet else NULL
-          data <- read_data_file(input$file$datapath, input$file$name, sheet = sheet_to_use)
-        } else {
-          # CSV/TSV file - no sheet selection needed
-          data <- read_data_file(input$file$datapath, input$file$name)
-        }
+        # Check if user indicated plate reader format
+        if (isTRUE(input$is_plate_format)) {
+          # Try plate reader format parsing
+          format_info <- detect_plate_format(input$file$datapath, input$file$name)
 
-        # Store the data for later use
-        raw_data(data)
+          if (format_info$format == "biotek") {
+            plate_result <- parse_biotek_synergy(input$file$datapath)
+            parsed_plate(plate_result)
+            # Show the corrected plate as a preview table
+            plate_df <- as.data.frame(plate_result$plate_corrected)
+            colnames(plate_df) <- paste0("Col_", 1:12)
+            plate_df$Row <- LETTERS[1:8]
+            plate_df <- plate_df[, c("Row", paste0("Col_", 1:12))]
+            raw_data(plate_df)
+            showNotification(
+              paste("Detected", format_info$instrument, "plate reader format.",
+                    if (plate_result$dual_wavelength) "Dual wavelength (background corrected)." else "Single wavelength."),
+              type = "message"
+            )
+          } else {
+            # Try generic plate grid parsing
+            plate_result <- parse_generic_plate(input$file$datapath, input$file$name)
+            parsed_plate(list(plate_corrected = plate_result$plate))
+            plate_df <- as.data.frame(plate_result$plate)
+            colnames(plate_df) <- paste0("Col_", 1:12)
+            plate_df$Row <- LETTERS[1:8]
+            plate_df <- plate_df[, c("Row", paste0("Col_", 1:12))]
+            raw_data(plate_df)
+            showNotification("Detected plate grid format. Assign sample types in Plate View.", type = "message")
+          }
+        } else {
+          # Standard columnar format
+          if (is_excel_file(input$file$name)) {
+            sheet_to_use <- if(!is.null(input$sheet)) input$sheet else NULL
+            data <- read_data_file(input$file$datapath, input$file$name, sheet = sheet_to_use)
+          } else {
+            data <- read_data_file(input$file$datapath, input$file$name)
+          }
+          raw_data(data)
+        }
       }, error = function(e) {
         # Just return an error without storing data
         return(
@@ -193,7 +223,10 @@ server <- function(input, output, session) {
   # Observer for analyze button
   observeEvent(input$analyze, {
     req(input$file)
-    req(input$sheet)
+    # Only require sheet selection for Excel files
+    if (is_excel_file(input$file$name)) {
+      req(input$sheet)
+    }
 
     # Show a progress notification
     withProgress(message = "Analyzing ELISA data...", value = 0, {
@@ -212,11 +245,14 @@ server <- function(input, output, session) {
 
       incProgress(0.1, detail = "Fitting models")
 
+      # Determine sheet name (NULL for CSV files)
+      sheet_to_use <- if (is_excel_file(input$file$name)) input$sheet else NULL
+
       # Run the analysis with user-selected parameters
       tryCatch({
         analysis_results <- analyze_elisa(
           file_path = input$file$datapath,
-          sheet_name = input$sheet,
+          sheet_name = sheet_to_use,
           file_name = input$file$name,
           well_col = input$well_col,
           type_col = input$type_col,
@@ -445,12 +481,143 @@ server <- function(input, output, session) {
 
   # Observer for competitive ELISA example
   observeEvent(input$loadExampleCompetitive, {
-    load_example_data("competitive_elisa_melatonin.csv", "Competitive ELISA (Melatonin)")
+    load_example_data("competitive_elisa_melatonin.csv", "Competitive ELISA (real data)")
+  })
+
+  # Observer for direct ELISA example
+  observeEvent(input$loadExampleDirect, {
+    load_example_data("direct_elisa_IgG.csv", "Direct ELISA (simulated)")
+  })
+
+  # Observer for indirect ELISA example
+  observeEvent(input$loadExampleIndirect, {
+    load_example_data("indirect_elisa_TNFa.csv", "Indirect ELISA IgG (real plate reader data)")
   })
 
   # Observer for sandwich ELISA example
   observeEvent(input$loadExampleSandwich, {
-    load_example_data("sandwich_elisa_IL6.csv", "Sandwich ELISA (IL-6)")
+    load_example_data("sandwich_elisa_IL6.csv", "Sandwich ELISA (real data, gtools::ELISA)")
+  })
+
+  # ============ Plate View Tab Outputs ============
+
+  # Generate 96-well plate visualization from uploaded data
+  output$plateViewOutput <- renderUI({
+    req(raw_data())
+    data <- raw_data()
+
+    well_col <- input$well_col
+    type_col <- input$type_col
+
+    if (is.null(well_col) || !well_col %in% colnames(data)) {
+      return(p(class = "text-muted", "Well ID column not found. Please check column mapping."))
+    }
+
+    # Parse well positions (e.g., A1 -> row=A, col=1)
+    wells <- as.character(data[[well_col]])
+    types <- if (!is.null(type_col) && type_col %in% colnames(data)) {
+      as.character(data[[type_col]])
+    } else {
+      rep("Unknown", length(wells))
+    }
+
+    # Build a well->type lookup
+    well_type_map <- setNames(types, wells)
+
+    # Standard labels
+    std_label <- input$std_label %||% "Standard"
+    blank_label <- input$blank_label %||% "Blank"
+    nsb_label <- input$nsb_label %||% "NSB"
+    b0_label <- input$b0_label %||% "B0"
+
+    # Classify well type for coloring
+    classify_well <- function(type) {
+      if (is.na(type) || type == "") return("empty")
+      if (type == std_label) return("std")
+      if (type == blank_label) return("blank")
+      if (type %in% c(nsb_label, b0_label, "QC_Low", "QC_Mid", "QC_High")) return("control")
+      return("sample")
+    }
+
+    row_labels <- LETTERS[1:8]
+    col_labels <- 1:12
+
+    # Build plate HTML
+    plate_rows <- list()
+
+    # Column headers
+    header_items <- list(tags$span(class = "plate-row-label", ""))
+    for (col in col_labels) {
+      header_items <- c(header_items, list(
+        tags$span(class = "plate-col-header", as.character(col))
+      ))
+    }
+    plate_rows <- c(plate_rows, list(div(header_items)))
+
+    # Well rows
+    for (row in row_labels) {
+      row_items <- list(tags$span(class = "plate-row-label", row))
+      for (col in col_labels) {
+        well_id <- paste0(row, col)
+        type <- well_type_map[well_id]
+        well_class <- if (!is.na(type)) classify_well(type) else "empty"
+        tooltip <- if (!is.na(type) && type != "") {
+          paste0(well_id, ": ", type)
+        } else {
+          paste0(well_id, ": Empty")
+        }
+
+        row_items <- c(row_items, list(
+          tags$span(
+            class = paste("plate-well", well_class),
+            title = tooltip,
+            substr(well_id, 2, nchar(well_id))
+          )
+        ))
+      }
+      plate_rows <- c(plate_rows, list(div(row_items)))
+    }
+
+    div(class = "plate-container", plate_rows)
+  })
+
+  # Plate summary table
+  output$plateSummaryTable <- renderTable({
+    req(raw_data())
+    data <- raw_data()
+    type_col <- input$type_col
+
+    if (is.null(type_col) || !type_col %in% colnames(data)) {
+      return(data.frame(Category = "N/A", Count = 0L))
+    }
+
+    type_counts <- as.data.frame(table(data[[type_col]]), stringsAsFactors = FALSE)
+    colnames(type_counts) <- c("Sample Type", "Count")
+    type_counts <- type_counts[order(-type_counts$Count), ]
+    type_counts
+  })
+
+  # Plate legend
+  output$plateLegend <- renderUI({
+    legend_items <- list(
+      div(class = "plate-legend-item",
+        tags$span(class = "plate-legend-swatch", style = "background-color: #dc3545;"), "Standard"),
+      div(class = "plate-legend-item",
+        tags$span(class = "plate-legend-swatch", style = "background-color: #0d6efd;"), "Sample"),
+      div(class = "plate-legend-item",
+        tags$span(class = "plate-legend-swatch", style = "background-color: #198754;"), "Control (NSB/B0/QC)"),
+      div(class = "plate-legend-item",
+        tags$span(class = "plate-legend-swatch", style = "background-color: #6c757d;"), "Blank"),
+      div(class = "plate-legend-item",
+        tags$span(class = "plate-legend-swatch", style = "background-color: #f8f9fa; border: 1px solid #ccc;"), "Empty")
+    )
+    div(
+      h5("Legend"),
+      legend_items,
+      hr(),
+      p(class = "text-muted small",
+        "Hover over wells to see sample type. Wells are mapped from the Well ID column in your data.")
+    )
   })
 
   # Reactive for filtered results based on toggle
@@ -476,7 +643,8 @@ server <- function(input, output, session) {
     create_standard_curve_plot(
       filtered_results(),
       selected_model,
-      show_reliability_colors = input$showReliabilityColors %||% TRUE
+      show_reliability_colors = input$showReliabilityColors %||% TRUE,
+      flip_axes = input$flipAxes %||% FALSE
     )
   })
   
@@ -484,10 +652,12 @@ server <- function(input, output, session) {
   output$standardsTable <- renderDT({
     req(filtered_results())
 
-    # Format the standards data for display
+    # Format the standards data for display - use constants and check availability
+    available_cols <- colnames(filtered_results()$standards)
+    display_cols <- intersect(c(COL_WELL, COL_CONCENTRATION, COL_OD, COL_RESPONSE), available_cols)
     standards_data <- filtered_results()$standards %>%
-      select(Well, Concentration, OD) %>%
-      arrange(Concentration)
+      select(all_of(display_cols)) %>%
+      arrange(!!sym(COL_CONCENTRATION))
 
     # Create the table
     datatable(standards_data,
@@ -673,28 +843,7 @@ server <- function(input, output, session) {
         backgroundColor = styleInterval(c(80, 120), c("#f8d7da", "#d4edda", "#f8d7da"))
       )
   })
-  
-  # Download handler
-  output$download_data <- downloadHandler(
-    filename = function() {
-      paste("ELISA_results_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".xlsx", sep = "")
-    },
-    content = function(file) {
-      req(filtered_results())
 
-      # Create a list of data frames to write to different sheets
-      data_list <- list(
-        "Standards" = filtered_results()$standards,
-        "Samples" = filtered_results()$samples,
-        "Sample Summary" = filtered_results()$sample_summary,
-        "Model Comparison" = filtered_results()$model_comparison
-      )
-
-      # Write to Excel file
-      writexl::write_xlsx(data_list, file)
-    }
-  )
-  
   # Data summary banner after upload
   output$dataSummaryInfo <- renderUI({
     req(raw_data())
@@ -907,7 +1056,7 @@ server <- function(input, output, session) {
   )
 
   # Helper function to create ggplot version for export
-  create_export_plot <- function(results, model_choice) {
+  create_export_plot <- function(results, model_choice, flip_axes = FALSE) {
     # Extract needed data elements
     std_summary <- results$std_summary
     samples_data <- results$samples
@@ -921,44 +1070,32 @@ server <- function(input, output, session) {
     max_conc <- max(std_summary$Concentration, na.rm = TRUE) * 10
     x_points <- exp(seq(log(min_conc), log(max_conc), length.out = 100))
 
-    # Build the plot
-    p <- ggplot() +
-      geom_point(data = std_summary, aes(x = Concentration, y = Mean_Response),
-                color = "red", size = 3, shape = 16) +
-      geom_errorbar(data = std_summary,
-                   aes(x = Concentration,
-                       ymin = Mean_Response - SD_Response,
-                       ymax = Mean_Response + SD_Response),
-                   width = 0.1, color = "red", alpha = 0.5)
+    # Prepare standard points and curve data as x/y columns
+    std_pts <- data.frame(
+      x = std_summary$Concentration,
+      y = std_summary$Mean_Response,
+      y_lo = std_summary$Mean_Response - std_summary$SD_Response,
+      y_hi = std_summary$Mean_Response + std_summary$SD_Response
+    )
 
-    # Add model curves based on choice
+    # Build curve data frames
+    curve_frames <- list()
     if (model_choice == "combined" || model_choice == "4pl") {
       if (!is.null(results$models[["4PL"]]) && results$models[["4PL"]]$is_valid()) {
         y_4pl <- tryCatch(results$models[["4PL"]]$predict_response(x_points), error = function(e) NULL)
-        if (!is.null(y_4pl)) {
-          p <- p + geom_line(data = data.frame(x = x_points, y = y_4pl),
-                            aes(x = x, y = y), color = "blue", size = 1)
-        }
+        if (!is.null(y_4pl)) curve_frames$f4pl <- data.frame(x = x_points, y = y_4pl, model = "4PL")
       }
     }
-
     if (model_choice == "combined" || model_choice == "5pl") {
       if (!is.null(results$models[["5PL"]]) && results$models[["5PL"]]$is_valid()) {
         y_5pl <- tryCatch(results$models[["5PL"]]$predict_response(x_points), error = function(e) NULL)
-        if (!is.null(y_5pl)) {
-          p <- p + geom_line(data = data.frame(x = x_points, y = y_5pl),
-                            aes(x = x, y = y), color = "purple", size = 1, linetype = "dashed")
-        }
+        if (!is.null(y_5pl)) curve_frames$f5pl <- data.frame(x = x_points, y = y_5pl, model = "5PL")
       }
     }
-
     if (model_choice == "combined" || model_choice == "linear") {
       if (!is.null(results$models[["Linear"]]) && results$models[["Linear"]]$is_valid()) {
         y_lin <- tryCatch(results$models[["Linear"]]$predict_response(x_points), error = function(e) NULL)
-        if (!is.null(y_lin)) {
-          p <- p + geom_line(data = data.frame(x = x_points, y = y_lin),
-                            aes(x = x, y = y), color = "green", size = 1)
-        }
+        if (!is.null(y_lin)) curve_frames$flin <- data.frame(x = x_points, y = y_lin, model = "Linear")
       }
     }
 
@@ -979,6 +1116,39 @@ server <- function(input, output, session) {
         .groups = "drop"
       ) %>%
       dplyr::filter(!Type %in% c("NSB", "B0", "Standard", "Blank"))
+
+    if (nrow(samples_summary) > 0) {
+      samp_pts <- data.frame(
+        x = samples_summary$Mean_Concentration,
+        y = samples_summary$Mean_Response,
+        x_lo = pmax(samples_summary$Mean_Concentration - samples_summary$SD_Concentration, min_conc_plot / 10),
+        x_hi = samples_summary$Mean_Concentration + samples_summary$SD_Concentration,
+        y_lo = samples_summary$Mean_Response - samples_summary$SD_Response,
+        y_hi = samples_summary$Mean_Response + samples_summary$SD_Response,
+        Is_Unreliable = samples_summary$Is_Unreliable,
+        Type = samples_summary$Type
+      )
+    } else {
+      samp_pts <- NULL
+    }
+
+    # Flip axes if requested
+    if (flip_axes) {
+      std_pts <- data.frame(x = std_pts$y, y = std_pts$x, y_lo = NA_real_, y_hi = NA_real_)
+      for (nm in names(curve_frames)) {
+        cf <- curve_frames[[nm]]
+        curve_frames[[nm]] <- data.frame(x = cf$y, y = cf$x, model = cf$model)
+      }
+      if (!is.null(samp_pts)) {
+        samp_pts <- data.frame(
+          x = samp_pts$y, y = samp_pts$x,
+          x_lo = samp_pts$y_lo, x_hi = samp_pts$y_hi,
+          y_lo = samp_pts$x_lo, y_hi = samp_pts$x_hi,
+          Is_Unreliable = samp_pts$Is_Unreliable,
+          Type = samp_pts$Type
+        )
+      }
+    }
 
     # Build warning captions
     warning_messages <- character(0)
@@ -1002,38 +1172,61 @@ server <- function(input, output, session) {
     }
     caption <- if (length(warning_messages) > 0) paste(warning_messages, collapse = "\n") else NULL
 
+    # Build the plot
+    p <- ggplot() +
+      geom_point(data = std_pts, aes(x = x, y = y), color = "red", size = 3, shape = 16) +
+      geom_errorbar(data = std_pts, aes(x = x, ymin = y_lo, ymax = y_hi),
+                    width = 0.1, color = "red", alpha = 0.5)
+
+    # Add model curves
+    curve_colors <- c("4PL" = "blue", "5PL" = "purple", "Linear" = "green")
+    curve_linetypes <- c("4PL" = "solid", "5PL" = "dashed", "Linear" = "solid")
+    for (cf in curve_frames) {
+      p <- p + geom_line(data = cf, aes(x = x, y = y),
+                         color = curve_colors[cf$model[1]],
+                         linetype = curve_linetypes[cf$model[1]],
+                         linewidth = 1)
+    }
+
     # Add sample points if any exist
-    if (nrow(samples_summary) > 0) {
+    if (!is.null(samp_pts) && nrow(samp_pts) > 0) {
       p <- p +
-        geom_point(data = samples_summary,
-                   aes(x = Mean_Concentration, y = Mean_Response,
-                       color = Is_Unreliable, shape = Type),
-                   size = 3) +
+        geom_point(data = samp_pts,
+                   aes(x = x, y = y, color = Is_Unreliable, shape = Type), size = 3) +
         scale_color_manual(values = c("TRUE" = "red", "FALSE" = "blue"),
                            name = "Unreliable Value") +
-        geom_errorbarh(data = samples_summary,
-                       aes(y = Mean_Response,
-                           xmin = pmax(Mean_Concentration - SD_Concentration, min_conc_plot / 10),
-                           xmax = Mean_Concentration + SD_Concentration),
+        geom_errorbarh(data = samp_pts,
+                       aes(y = y, xmin = x_lo, xmax = x_hi),
                        height = 0.01, alpha = 0.5, color = "gray50") +
-        geom_errorbar(data = samples_summary,
-                      aes(x = Mean_Concentration,
-                          y = Mean_Response,
-                          ymin = Mean_Response - SD_Response,
-                          ymax = Mean_Response + SD_Response),
+        geom_errorbar(data = samp_pts,
+                      aes(x = x, ymin = y_lo, ymax = y_hi),
                       width = 0.1, alpha = 0.5, color = "gray50")
     }
 
-    # Add formatting
+    # Add formatting — axis labels and log scale depend on flip_axes
+    if (flip_axes) {
+      p <- p +
+        scale_y_log10(labels = scales::label_number(), breaks = scales::breaks_log(n = 8)) +
+        geom_hline(yintercept = min(std_summary$Concentration, na.rm = TRUE),
+                   linetype = "dashed", alpha = 0.3) +
+        geom_hline(yintercept = max(std_summary$Concentration, na.rm = TRUE),
+                   linetype = "dashed", alpha = 0.3) +
+        labs(x = y_axis_label, y = "Concentration (log scale)",
+             title = paste0("ELISA Standard Curve - ", toupper(model_choice)),
+             subtitle = paste("Best model:", best_model), caption = caption)
+    } else {
+      p <- p +
+        scale_x_log10(labels = scales::label_number(), breaks = scales::breaks_log(n = 8)) +
+        geom_vline(xintercept = min(std_summary$Concentration, na.rm = TRUE),
+                   linetype = "dashed", alpha = 0.3) +
+        geom_vline(xintercept = max(std_summary$Concentration, na.rm = TRUE),
+                   linetype = "dashed", alpha = 0.3) +
+        labs(x = "Concentration (log scale)", y = y_axis_label,
+             title = paste0("ELISA Standard Curve - ", toupper(model_choice)),
+             subtitle = paste("Best model:", best_model), caption = caption)
+    }
+
     p <- p +
-      scale_x_log10(labels = scales::label_number(), breaks = scales::breaks_log(n = 8)) +
-      labs(
-        title = paste0("ELISA Standard Curve - ", toupper(model_choice)),
-        subtitle = paste("Best model:", best_model),
-        x = "Concentration (log scale)",
-        y = y_axis_label,
-        caption = caption
-      ) +
       theme_minimal() +
       theme(
         plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
@@ -1041,11 +1234,7 @@ server <- function(input, output, session) {
         axis.title = element_text(size = 12),
         plot.caption = element_text(hjust = 0, color = "red", size = 10),
         legend.position = "bottom"
-      ) +
-      geom_vline(xintercept = min(std_summary$Concentration, na.rm = TRUE),
-                linetype = "dashed", alpha = 0.3) +
-      geom_vline(xintercept = max(std_summary$Concentration, na.rm = TRUE),
-                linetype = "dashed", alpha = 0.3)
+      )
 
     return(p)
   }
@@ -1057,7 +1246,7 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       req(filtered_results())
-      p <- create_export_plot(filtered_results(), "combined")
+      p <- create_export_plot(filtered_results(), "combined", flip_axes = input$flipAxes %||% FALSE)
       ggsave(file, plot = p, width = 12, height = 8, dpi = 150, bg = "white")
     }
   )
@@ -1068,7 +1257,7 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       req(filtered_results())
-      p <- create_export_plot(filtered_results(), "4pl")
+      p <- create_export_plot(filtered_results(), "4pl", flip_axes = input$flipAxes %||% FALSE)
       ggsave(file, plot = p, width = 12, height = 8, dpi = 150, bg = "white")
     }
   )
@@ -1079,7 +1268,7 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       req(filtered_results())
-      p <- create_export_plot(filtered_results(), "5pl")
+      p <- create_export_plot(filtered_results(), "5pl", flip_axes = input$flipAxes %||% FALSE)
       ggsave(file, plot = p, width = 12, height = 8, dpi = 150, bg = "white")
     }
   )
@@ -1090,7 +1279,7 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       req(filtered_results())
-      p <- create_export_plot(filtered_results(), "linear")
+      p <- create_export_plot(filtered_results(), "linear", flip_axes = input$flipAxes %||% FALSE)
       ggsave(file, plot = p, width = 12, height = 8, dpi = 150, bg = "white")
     }
   )
@@ -1168,16 +1357,17 @@ server <- function(input, output, session) {
 
       # Create plot files using ggplot2 for reliable export
       tryCatch({
-        p_combined <- create_export_plot(filtered_results(), "combined")
+        flip <- input$flipAxes %||% FALSE
+        p_combined <- create_export_plot(filtered_results(), "combined", flip_axes = flip)
         ggsave(combined_plot, plot = p_combined, width = 12, height = 8, dpi = 150, bg = "white")
 
-        p_4pl <- create_export_plot(filtered_results(), "4pl")
+        p_4pl <- create_export_plot(filtered_results(), "4pl", flip_axes = flip)
         ggsave(fourpl_plot, plot = p_4pl, width = 12, height = 8, dpi = 150, bg = "white")
 
-        p_5pl <- create_export_plot(filtered_results(), "5pl")
+        p_5pl <- create_export_plot(filtered_results(), "5pl", flip_axes = flip)
         ggsave(fivepl_plot, plot = p_5pl, width = 12, height = 8, dpi = 150, bg = "white")
 
-        p_linear <- create_export_plot(filtered_results(), "linear")
+        p_linear <- create_export_plot(filtered_results(), "linear", flip_axes = flip)
         ggsave(linear_plot, plot = p_linear, width = 12, height = 8, dpi = 150, bg = "white")
       }, error = function(e) {
         message("Error generating plot: ", e$message)
