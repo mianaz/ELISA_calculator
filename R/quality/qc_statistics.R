@@ -652,10 +652,12 @@ calculate_prediction_ci <- function(response, model, std_data, level = 0.95, met
           abs(deriv) * sigma
         })
 
-        # Calculate CI
-        z <- qnorm(1 - (1 - level) / 2)
-        ci_lower <- predictions - z * se_conc
-        ci_upper <- predictions + z * se_conc
+        # Calculate CI using t-distribution for small sample sizes
+        n_std <- length(response)
+        df <- max(n_std - 2, 1)  # degrees of freedom from calibration curve
+        t_val <- qt(1 - (1 - level) / 2, df)
+        ci_lower <- predictions - t_val * se_conc
+        ci_upper <- predictions + t_val * se_conc
 
         # Ensure lower bound is positive
         ci_lower <- pmax(ci_lower, 0)

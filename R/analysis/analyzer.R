@@ -254,7 +254,7 @@ analyze_elisa <- function(
     # Use processed standards/samples pipeline: blanks need the same normalization
     blank_response <- if (COL_RESPONSE %in% colnames(standards)) {
       # Look for blank-level responses from the processed standards data
-      blank_rows <- data %>% filter(Type == blank_label)
+      blank_rows <- data %>% filter(!!sym(COL_TYPE) == blank_label)
       if (nrow(blank_rows) > 0) {
         # Process blank data through the same pipeline as standards
         blank_processed <- process_standards(blank_rows, controls, skip_normalization, log_transform, config)
@@ -464,11 +464,10 @@ apply_concentration_capping <- function(samples, std_range, standards) {
   # Initialize capped concentration column
   samples[[COL_CAPPED_CONC]] <- samples[[COL_PRED_CONC]]
 
-  # Get nearest standard concentration for NA values
+  # Flag NA predictions but do NOT impute with median — leave as NA to avoid biasing summaries
   na_idx <- which(is.na(samples[[COL_PRED_CONC]]))
   if (length(na_idx) > 0) {
-    # Use median standard concentration for uncalculatable samples
-    samples[[COL_CAPPED_CONC]][na_idx] <- median(std_concentrations, na.rm = TRUE)
+    samples[[COL_CAPPED_CONC]][na_idx] <- NA_real_
   }
 
   # Cap values below range

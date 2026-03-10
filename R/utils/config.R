@@ -8,10 +8,10 @@ get_default_config <- function() {
   list(
     # Application settings
     app_name = "ELISA Analyzer",
-    app_version = "2.0.0",
+    app_version = "0.9.0-beta",
 
     # Assay type settings
-    assay_types = c("competitive", "direct", "sandwich", "auto"),
+    assay_types = c("competitive", "direct", "indirect", "sandwich", "auto"),
     default_assay_type = "auto",
 
     # Sample type labels
@@ -172,7 +172,7 @@ validate_config <- function(config) {
 
   # Validate assay types
   if ("assay_types" %in% names(config)) {
-    valid_assay_types <- c("competitive", "direct", "sandwich", "auto")
+    valid_assay_types <- c("competitive", "direct", "indirect", "sandwich", "auto")
     invalid_types <- setdiff(config$assay_types, valid_assay_types)
 
     if (length(invalid_types) > 0) {

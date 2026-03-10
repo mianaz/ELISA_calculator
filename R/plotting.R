@@ -7,7 +7,7 @@
 #' @param model_choice Model choice (combined, 4pl, linear)
 #' @param show_reliability_colors Whether to color-code unreliable values
 #' @return Plotly plot object
-create_standard_curve_plot <- function(results, model_choice = "combined", show_reliability_colors = TRUE) {
+create_standard_curve_plot <- function(results, model_choice = "combined", show_reliability_colors = TRUE, flip_axes = FALSE) {
   # Extract needed data elements
   std_summary <- results$std_summary
   samples_data <- results$samples
@@ -251,6 +251,31 @@ create_standard_curve_plot <- function(results, model_choice = "combined", show_
     "Samples (Unreliable)"  = 16    # circle
   )
 
+  # When flip_axes is TRUE, swap x/y so users can read Concentration from OD
+  if (flip_axes) {
+    all_points <- all_points %>%
+      dplyr::mutate(
+        x_orig = x, y_orig = y,
+        x = y_orig, y = x_orig,
+        y_lo_orig = y_lo, y_hi_orig = y_hi,
+        x_lo_orig = x_lo, x_hi_orig = x_hi,
+        # vertical error bars become the old x error bars
+        y_lo = x_lo_orig, y_hi = x_hi_orig,
+        # horizontal error bars become the old y error bars
+        x_lo = y_lo_orig, x_hi = y_hi_orig
+      )
+
+    std_points <- all_points %>% dplyr::filter(Category == "Standards")
+    if (!is.null(sample_points) && nrow(sample_points) > 0) {
+      sample_points <- all_points %>% dplyr::filter(Category != "Standards")
+    }
+
+    if (!is.null(curve_data) && nrow(curve_data) > 0) {
+      curve_data <- curve_data %>%
+        dplyr::mutate(x_orig = x, x = y, y = x_orig)
+    }
+  }
+
   # Build the plot
   p <- ggplot() +
     # All data points with unified legend
@@ -259,7 +284,7 @@ create_standard_curve_plot <- function(results, model_choice = "combined", show_
                size = 3) +
     scale_color_manual(values = cat_colors, name = NULL) +
     scale_shape_manual(values = cat_shapes, name = NULL) +
-    # Error bars for standards (vertical only)
+    # Error bars for standards (vertical only in normal mode)
     geom_errorbar(data = std_points,
                   aes(x = x, ymin = y_lo, ymax = y_hi),
                   width = 0.1, color = "#dc2626", alpha = 0.4)
@@ -291,7 +316,7 @@ create_standard_curve_plot <- function(results, model_choice = "combined", show_
                     aes(x = x, ymin = y_lo, ymax = y_hi),
                     width = 0.1, alpha = 0.3, color = "gray50")
   }
-  
+
   # Determine subtitle based on model choice
   subtitle <- if(model_choice == "combined") {
     paste0("Best model: ", best_model)
@@ -300,20 +325,37 @@ create_standard_curve_plot <- function(results, model_choice = "combined", show_
   } else {
     paste0(model_name, " parameters")
   }
-  
+
+  # Axis labels and log scale depend on flip_axes
+  if (flip_axes) {
+    x_label <- y_axis_label
+    y_label <- "Concentration (log scale)"
+    p <- p +
+      scale_y_log10(labels = scales::label_number(), breaks = scales::breaks_log(n = 8)) +
+      geom_hline(yintercept = min(std_summary$Concentration, na.rm = TRUE),
+                 linetype = "dashed", alpha = 0.3) +
+      geom_hline(yintercept = max(std_summary$Concentration, na.rm = TRUE),
+                 linetype = "dashed", alpha = 0.3)
+  } else {
+    x_label <- "Concentration (log scale)"
+    y_label <- y_axis_label
+    p <- p +
+      scale_x_log10(labels = scales::label_number(), breaks = scales::breaks_log(n = 8)) +
+      geom_vline(xintercept = min(std_summary$Concentration, na.rm = TRUE),
+                 linetype = "dashed", alpha = 0.3) +
+      geom_vline(xintercept = max(std_summary$Concentration, na.rm = TRUE),
+                 linetype = "dashed", alpha = 0.3)
+  }
+
   # Add labels and formatting
   p <- p +
-    # Formatting
-    scale_x_log10(labels = scales::label_number(), breaks = scales::breaks_log(n = 8)) +
-    # Labels
     labs(
       title = paste0("ELISA Standard Curve - ", model_name),
       subtitle = subtitle,
-      x = "Concentration (log scale)",
-      y = y_axis_label,
+      x = x_label,
+      y = y_label,
       caption = caption
     ) +
-    # Theme
     theme_minimal() +
     theme(
       plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
@@ -321,12 +363,7 @@ create_standard_curve_plot <- function(results, model_choice = "combined", show_
       axis.title = element_text(size = 12),
       plot.caption = element_text(hjust = 0, color = "red", size = 10),
       legend.position = "bottom"
-    ) +
-    # Standard curve range indicators
-    geom_vline(xintercept = min(std_summary$Concentration, na.rm = TRUE),
-             linetype = "dashed", alpha = 0.3) +
-    geom_vline(xintercept = max(std_summary$Concentration, na.rm = TRUE),
-             linetype = "dashed", alpha = 0.3)
+    )
   
   # Convert to plotly for interactivity
   p_plotly <- ggplotly(p, tooltip = "text") %>%
