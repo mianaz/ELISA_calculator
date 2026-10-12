@@ -52,7 +52,7 @@ Elisa5PLModel <- R6Class("Elisa5PLModel",
           !is.na(!!sym(COL_RESPONSE)),
           is.finite(!!sym(COL_CONCENTRATION)),
           is.finite(!!sym(COL_RESPONSE)),
-          !!sym(COL_CONCENTRATION) > 0  # Need positive concentrations for log-logistic
+          !!sym(COL_CONCENTRATION) >= 0  # zero standard stays in: drc log-logistic gives f(0) = upper asymptote (B0 anchor)
         )
 
       # Store the cleaned data used for fitting (for accurate R² calculation)

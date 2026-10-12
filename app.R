@@ -1215,7 +1215,10 @@ server <- function(input, output, session) {
     }
 
     data.frame(
-      Metric = c("LOD", "LOQ", "ULOQ", "Dynamic Range"),
+      Metric = c(
+        if (identical(limits$lod$details$blank_source, "zero-standard")) "LOD (0 standard)" else "LOD",
+        "LOQ", "ULOQ", "Dynamic Range"
+      ),
       Value = c(
         if (!is.null(limits$lod$concentration) && !is.na(limits$lod$concentration))
           format(limits$lod$concentration, digits = 4, scientific = TRUE) else "N/A",
