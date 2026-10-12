@@ -36,7 +36,7 @@ fit_all_models <- function(data, log_transform = TRUE,
       message("  5PL model fitted successfully")
 
       # Check if 5PL is essentially 4PL (g ≈ 1)
-      if (model_5pl$is_symmetric(tolerance = 0.15)) {
+      if (isTRUE(model_5pl$is_symmetric(tolerance = 0.15))) {
         message("  Note: 5PL asymmetry parameter (g) is close to 1 - curve is nearly symmetric")
       }
     } else {

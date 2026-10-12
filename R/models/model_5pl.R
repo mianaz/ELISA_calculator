@@ -90,7 +90,13 @@ Elisa5PLModel <- R6Class("Elisa5PLModel",
 
         # Extract parameters
         self$extract_parameters()
-        self$is_fitted <- TRUE
+        # Verify params were extracted: if b is NA, drm returned a broken model
+        if (is.na(self$parameters$b)) {
+          self$fit_error <- "5PL fitting failed: model did not converge (check standard curve quality)"
+          self$is_fitted <- FALSE
+        } else {
+          self$is_fitted <- TRUE
+        }
 
       }, error = function(e) {
         self$fit_error <- paste("5PL fitting failed:", e$message)
@@ -111,6 +117,12 @@ Elisa5PLModel <- R6Class("Elisa5PLModel",
       tryCatch({
         params <- coef(self$fitted_model)
 
+        # Guard: coef() can return NULL when drc fails silently (errorm=FALSE)
+        if (is.null(params) || !is.numeric(params) || length(params) == 0) {
+          self$fit_warnings <- c(self$fit_warnings, "Model coefficients unavailable (convergence failure)")
+          return(invisible(NULL))
+        }
+
         # drc package LL.5() parameter naming: b, c, d, e, f
         # where: b=slope, c=lower, d=upper, e=ED50, f=asymmetry
         if ("b:(Intercept)" %in% names(params)) {
@@ -121,11 +133,13 @@ Elisa5PLModel <- R6Class("Elisa5PLModel",
           self$parameters$f <- unname(params["f:(Intercept)"])  # asymmetry
         } else {
           # Generic fallback - assume order [b, c, d, e, f]
-          self$parameters$b <- unname(params[1])  # slope
-          self$parameters$c <- unname(params[2])  # lower
-          self$parameters$d <- unname(params[3])  # upper
-          self$parameters$e <- unname(params[4])  # ED50
-          self$parameters$f <- unname(params[5])  # asymmetry
+          # Use NA instead of NULL when index is out of bounds to avoid deleting list keys
+          safe_param <- function(v, i) if (length(v) >= i && !is.null(v[[i]])) unname(v[i]) else NA
+          self$parameters$b <- safe_param(params, 1)
+          self$parameters$c <- safe_param(params, 2)
+          self$parameters$d <- safe_param(params, 3)
+          self$parameters$e <- safe_param(params, 4)
+          self$parameters$f <- safe_param(params, 5)
           self$fit_warnings <- c(self$fit_warnings, "Could not identify parameter names, used positional assignment")
         }
 
@@ -241,7 +255,7 @@ Elisa5PLModel <- R6Class("Elisa5PLModel",
       e <- self$parameters$e
       f <- self$parameters$f
 
-      if (any(is.na(c(b, c, d, e, f)))) {
+      if (is.null(f) || any(is.na(c(b, c, d, e, f)))) {
         return("5PL model parameters not available")
       }
 
@@ -277,7 +291,7 @@ Elisa5PLModel <- R6Class("Elisa5PLModel",
     #' @param tolerance Tolerance for comparing f to 1
     #' @return Logical indicating if model is essentially symmetric
     is_symmetric = function(tolerance = 0.1) {
-      if (!self$is_fitted || is.na(self$parameters$f)) {
+      if (!self$is_fitted || is.null(self$parameters$f) || is.na(self$parameters$f)) {
         return(NA)
       }
       return(abs(self$parameters$f - 1) < tolerance)
@@ -287,7 +301,7 @@ Elisa5PLModel <- R6Class("Elisa5PLModel",
     #'
     #' @return Character description of curve asymmetry
     get_asymmetry_description = function() {
-      if (!self$is_fitted || is.na(self$parameters$f)) {
+      if (!self$is_fitted || is.null(self$parameters$f) || is.na(self$parameters$f)) {
         return("Cannot assess asymmetry")
       }
 

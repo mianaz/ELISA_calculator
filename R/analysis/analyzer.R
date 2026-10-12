@@ -66,6 +66,7 @@ analyze_elisa <- function(
     weight_type = "none",
     models_to_fit = c(MODEL_4PL, MODEL_5PL, MODEL_LINEAR),
     calculate_limits = TRUE,
+    normalize_per_plate = FALSE,
     config = NULL
 ) {
 
@@ -125,6 +126,16 @@ analyze_elisa <- function(
   message("\n[3/8] Cleaning data...")
   data <- clean_data(data, remove_unlabeled)
   message("  ", nrow(data), " rows after cleaning")
+
+  # STEP 3.5: Per-plate B/B0% normalization (removes plate-to-plate OD variation)
+  if (isTRUE(normalize_per_plate)) {
+    message("\n[3.5/8] Normalizing by B/B0% per plate...")
+    # Determine which OD column to normalize
+    norm_od_col <- if (use_corrected && COL_OD_CORRECTED %in% colnames(data)) COL_OD_CORRECTED else COL_OD
+    data <- normalize_per_plate_bb0(data, norm_od_col, b0_label, nsb_label)
+    # B0 and NSB are now ~100% and ~0% by definition — skip further normalization
+    skip_normalization <- TRUE
+  }
 
   # STEP 4: Extract controls, standards, and samples
   message("\n[4/8] Extracting data groups...")
@@ -247,7 +258,7 @@ analyze_elisa <- function(
   assay_limits <- NULL
   standards_accuracy <- NULL
 
-  if (calculate_limits && !is.null(model_selection$best_model)) {
+  if (isTRUE(calculate_limits) && !is.null(model_selection$best_model)) {
     message("\n[9/10] Calculating assay limits (LOD/LOQ/ULOQ)...")
 
     # Get blank response values for LOD/LOQ
@@ -424,8 +435,8 @@ apply_dilution_factors <- function(samples, dilution_factors) {
   # If dilution_factors is a named vector
   if (is.vector(dilution_factors) && !is.null(names(dilution_factors))) {
     for (sample_type in names(dilution_factors)) {
-      idx <- samples[[COL_TYPE]] == sample_type
-      if (any(idx)) {
+      idx <- !is.na(samples[[COL_TYPE]]) & samples[[COL_TYPE]] == sample_type
+      if (any(idx, na.rm = TRUE)) {
         samples[[COL_DILUTION_FACTOR]][idx] <- dilution_factors[sample_type]
         samples[[COL_FINAL_CONC]][idx] <- samples[[COL_CAPPED_CONC]][idx] * dilution_factors[sample_type]
       }
@@ -439,8 +450,8 @@ apply_dilution_factors <- function(samples, dilution_factors) {
         sample_type <- dilution_factors$Type[i]
         factor <- dilution_factors$Dilution[i]
 
-        idx <- samples[[COL_TYPE]] == sample_type
-        if (any(idx)) {
+        idx <- !is.na(samples[[COL_TYPE]]) & samples[[COL_TYPE]] == sample_type
+        if (any(idx, na.rm = TRUE)) {
           samples[[COL_DILUTION_FACTOR]][idx] <- factor
           samples[[COL_FINAL_CONC]][idx] <- samples[[COL_CAPPED_CONC]][idx] * factor
         }
@@ -482,9 +493,9 @@ apply_concentration_capping <- function(samples, std_range, standards) {
     samples[[COL_CAPPED_CONC]][above_idx] <- std_concentrations[length(std_concentrations)]
   }
 
-  # Add flags
+  # Add flags — %in% TRUE coerces NA to FALSE safely (NA %in% TRUE == FALSE)
   samples[[COL_IS_CAPPED]] <- samples[[COL_CAPPED_CONC]] != samples[[COL_PRED_CONC]] | is.na(samples[[COL_PRED_CONC]])
-  samples[[COL_IS_UNRELIABLE]] <- samples[[COL_IS_CAPPED]] | samples[[COL_OUT_OF_RANGE]]
+  samples[[COL_IS_UNRELIABLE]] <- (samples[[COL_IS_CAPPED]] %in% TRUE) | (samples[[COL_OUT_OF_RANGE]] %in% TRUE)
 
   return(samples)
 }

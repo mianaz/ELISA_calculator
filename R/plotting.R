@@ -7,7 +7,14 @@
 #' @param model_choice Model choice (combined, 4pl, linear)
 #' @param show_reliability_colors Whether to color-code unreliable values
 #' @return Plotly plot object
-create_standard_curve_plot <- function(results, model_choice = "combined", show_reliability_colors = TRUE, flip_axes = FALSE) {
+create_standard_curve_plot <- function(results, model_choice = "combined", show_reliability_colors = TRUE, flip_axes = FALSE,
+                                       point_size = 3, line_size = 1.2, palette = "candy_bright",
+                                       theme_name = "cowplot", font_family = "Arial",
+                                       std_color = "#dc2626", sample_color = "#2563eb", unreliable_color = "#eab308",
+                                       show_r2 = TRUE, show_x_errbar = FALSE, show_ci = FALSE,
+                                       plot_title = NULL, x_title = NULL, y_title = NULL,
+                                       color_samples_individually = FALSE,
+                                       return_ggplot = FALSE) {
   # Extract needed data elements
   std_summary <- results$std_summary
   samples_data <- results$samples
@@ -210,7 +217,10 @@ create_standard_curve_plot <- function(results, model_choice = "combined", show_
         )
       )
 
-    if (show_reliability_colors) {
+    if (isTRUE(color_samples_individually)) {
+      samples_summary <- samples_summary %>%
+        dplyr::mutate(Category = Type)
+    } else if (show_reliability_colors) {
       samples_summary <- samples_summary %>%
         dplyr::mutate(Category = ifelse(Is_Unreliable, "Samples (Unreliable)", "Samples (Reliable)"))
     } else {
@@ -233,16 +243,12 @@ create_standard_curve_plot <- function(results, model_choice = "combined", show_
   # Combine all points
   all_points <- dplyr::bind_rows(std_points, sample_points)
 
-  # Set factor order so legend is: Standards, Samples (Reliable), Samples (Unreliable)
-  cat_levels <- c("Standards", "Samples", "Samples (Reliable)", "Samples (Unreliable)")
-  all_points$Category <- factor(all_points$Category, levels = cat_levels[cat_levels %in% unique(all_points$Category)])
-
-  # Define colors and shapes per category
+  # Define base colors and shapes per category
   cat_colors <- c(
-    "Standards"             = "#dc2626",
-    "Samples"               = "#2563eb",
-    "Samples (Reliable)"    = "#2563eb",
-    "Samples (Unreliable)"  = "#eab308"
+    "Standards"             = std_color,
+    "Samples"               = sample_color,
+    "Samples (Reliable)"    = sample_color,
+    "Samples (Unreliable)"  = unreliable_color
   )
   cat_shapes <- c(
     "Standards"             = 15,   # square
@@ -250,6 +256,34 @@ create_standard_curve_plot <- function(results, model_choice = "combined", show_
     "Samples (Reliable)"    = 16,   # circle
     "Samples (Unreliable)"  = 16    # circle
   )
+
+  # When coloring individually, generate a distinct color per sample type
+  if (isTRUE(color_samples_individually) && !is.null(sample_points) && nrow(sample_points) > 0) {
+    sample_types <- unique(all_points$Category[all_points$Category %in% unique(samples_summary$Type)])
+    n <- length(sample_types)
+    if (n > 0) {
+      palette_colors <- if (n <= 8) {
+        RColorBrewer::brewer.pal(max(3, n), "Set1")[seq_len(n)]
+      } else if (n <= 12) {
+        RColorBrewer::brewer.pal(max(3, n), "Paired")[seq_len(n)]
+      } else {
+        scales::hue_pal()(n)
+      }
+      extra_colors <- setNames(palette_colors, sample_types)
+      extra_shapes <- setNames(rep(16L, n), sample_types)
+      cat_colors <- c(cat_colors, extra_colors)
+      cat_shapes <- c(cat_shapes, extra_shapes)
+    }
+  }
+
+  # Set factor order so legend is: Standards, then samples
+  if (isTRUE(color_samples_individually)) {
+    sample_cats <- setdiff(unique(all_points$Category), "Standards")
+    cat_levels <- c("Standards", sort(sample_cats))
+  } else {
+    cat_levels <- c("Standards", "Samples", "Samples (Reliable)", "Samples (Unreliable)")
+  }
+  all_points$Category <- factor(all_points$Category, levels = cat_levels[cat_levels %in% unique(all_points$Category)])
 
   # When flip_axes is TRUE, swap x/y so users can read Concentration from OD
   if (flip_axes) {
@@ -281,7 +315,7 @@ create_standard_curve_plot <- function(results, model_choice = "combined", show_
     # All data points with unified legend
     geom_point(data = all_points,
                aes(x = x, y = y, color = Category, shape = Category, text = hover_text),
-               size = 3) +
+               size = point_size) +
     scale_color_manual(values = cat_colors, name = NULL) +
     scale_shape_manual(values = cat_shapes, name = NULL) +
     # Error bars for standards (vertical only in normal mode)
@@ -295,26 +329,48 @@ create_standard_curve_plot <- function(results, model_choice = "combined", show_
       p <- p +
         geom_line(data = curve_data,
                   aes(x = x, y = y, linetype = Model),
-                  color = "#475569", linewidth = 0.8) +
+                  color = "#475569", linewidth = line_size) +
         scale_linetype_manual(values = c("4PL" = "solid", "5PL" = "longdash", "Linear" = "dotted"),
                               name = "Model")
     } else {
       p <- p +
         geom_line(data = curve_data,
                   aes(x = x, y = y),
-                  color = model_color, linewidth = 0.8)
+                  color = model_color, linewidth = line_size)
     }
   }
 
-  # Error bars for samples
+  # 95% CI ribbon
+  if (isTRUE(show_ci) && !is.null(curve_data) && nrow(curve_data) > 0) {
+    tryCatch({
+      for (mod_name in unique(curve_data$Model)) {
+        mod_obj <- if (mod_name == "4PL") results$models[["4PL"]] else
+                   if (mod_name == "5PL") results$models[["5PL"]] else
+                   if (mod_name == "Linear") results$models[["Linear"]] else NULL
+        if (is.null(mod_obj) || !mod_obj$is_valid()) next
+        x_ci <- curve_data$x[curve_data$Model == mod_name]
+        ci <- tryCatch(mod_obj$predict_ci(x_ci), error = function(e) NULL)
+        if (!is.null(ci) && is.data.frame(ci) && "lower" %in% names(ci)) {
+          ci_df <- data.frame(x = x_ci, ymin = ci$lower, ymax = ci$upper)
+          p <- p + geom_ribbon(data = ci_df, aes(x = x, ymin = ymin, ymax = ymax),
+                               alpha = 0.12, fill = "#475569", inherit.aes = FALSE)
+        }
+      }
+    }, error = function(e) NULL)
+  }
+
+  # Error bars for samples (y-axis always; x-axis only if show_x_errbar)
   if (!is.null(sample_points) && nrow(sample_points) > 0) {
     p <- p +
-      geom_errorbarh(data = sample_points,
-                     aes(y = y, xmin = x_lo, xmax = x_hi),
-                     height = 0.01, alpha = 0.3, color = "gray50") +
       geom_errorbar(data = sample_points,
                     aes(x = x, ymin = y_lo, ymax = y_hi),
-                    width = 0.1, alpha = 0.3, color = "gray50")
+                    width = 0.08, alpha = 0.4, color = "gray40")
+    if (isTRUE(show_x_errbar)) {
+      p <- p +
+        geom_errorbarh(data = sample_points,
+                       aes(y = y, xmin = x_lo, xmax = x_hi),
+                       height = 0.01, alpha = 0.3, color = "gray50")
+    }
   }
 
   # Determine subtitle based on model choice
@@ -347,24 +403,60 @@ create_standard_curve_plot <- function(results, model_choice = "combined", show_
                  linetype = "dashed", alpha = 0.3)
   }
 
-  # Add labels and formatting
+  # Apply custom titles/labels
+  final_title  <- if (!is.null(plot_title)  && nchar(plot_title)  > 0) plot_title  else paste0("ELISA Standard Curve - ", model_name)
+  final_xlabel <- if (!is.null(x_title)     && nchar(x_title)     > 0) x_title     else x_label
+  final_ylabel <- if (!is.null(y_title)     && nchar(y_title)     > 0) y_title     else y_label
+
   p <- p +
     labs(
-      title = paste0("ELISA Standard Curve - ", model_name),
+      title    = final_title,
       subtitle = subtitle,
-      x = x_label,
-      y = y_label,
-      caption = caption
-    ) +
-    theme_minimal() +
+      x        = final_xlabel,
+      y        = final_ylabel,
+      caption  = caption
+    )
+
+  # Apply selected theme
+  base_theme <- switch(theme_name,
+    "cowplot" = cowplot::theme_cowplot(),
+    "prism"   = ggprism::theme_prism(border = TRUE),
+    "minimal" = theme_minimal(),
+    "classic" = theme_classic(),
+    "bw"      = theme_bw(),
+    cowplot::theme_cowplot()
+  )
+  p <- p + base_theme +
     theme(
-      plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
-      plot.subtitle = element_text(hjust = 0.5, size = 10),
-      axis.title = element_text(size = 12),
+      text         = element_text(family = font_family),
+      plot.title   = element_text(hjust = 0.5, size = 14, face = "bold", family = font_family),
+      plot.subtitle = element_text(hjust = 0.5, size = 10, family = font_family),
+      axis.title   = element_text(size = 12, family = font_family),
+      axis.text    = element_text(family = font_family),
       plot.caption = element_text(hjust = 0, color = "red", size = 10),
       legend.position = "bottom"
     )
+
+  # Add R² annotation if requested
+  if (isTRUE(show_r2)) {
+    r2_val <- tryCatch({
+      best_mod_obj <- results$models[[results$best_model_name]]
+      if (!is.null(best_mod_obj) && best_mod_obj$is_valid()) {
+        stats <- best_mod_obj$get_fit_stats()
+        if (!is.null(stats$r_squared)) round(stats$r_squared, 4) else NULL
+      } else NULL
+    }, error = function(e) NULL)
+    if (!is.null(r2_val)) {
+      p <- p + annotate("text", x = -Inf, y = Inf,
+                        label = paste0("R² = ", r2_val),
+                        hjust = -0.1, vjust = 1.5, size = 4,
+                        family = font_family, fontface = "italic")
+    }
+  }
   
+  # Return raw ggplot if requested (for PNG export)
+  if (isTRUE(return_ggplot)) return(p)
+
   # Convert to plotly for interactivity
   p_plotly <- ggplotly(p, tooltip = "text") %>%
     layout(

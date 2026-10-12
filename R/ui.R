@@ -5,7 +5,7 @@
 #' @return Shiny UI object
 create_ui <- function() {
 
-  # JavaScript for plot invalidation, file input reset, and plate view
+  # JavaScript for plot invalidation, file input reset, plate view, and paste/copy helpers
   custom_js <- HTML("
     Shiny.addCustomMessageHandler('plot_invalidate', function(outputId) {
       Shiny.unbindOutput(outputId);
@@ -19,6 +19,83 @@ create_ui <- function() {
         container.find(\".form-control\").val(\"\");
       }
       Shiny.setInputValue(inputId, null);
+    });
+
+    // ---- Drag-select wells ----
+    (function() {
+      var isDragging = false;
+      var dragMoved = false;
+      var mouseDownWell = null;
+      var selectedWells = [];
+
+      function clearSelection() {
+        document.querySelectorAll('.plate-well.selecting').forEach(function(w) {
+          w.classList.remove('selecting');
+        });
+        selectedWells = [];
+      }
+
+      document.addEventListener('mousedown', function(e) {
+        var well = e.target.closest ? e.target.closest('.plate-well') : null;
+        if (!well) return;
+        e.preventDefault();
+        isDragging = true;
+        dragMoved = false;
+        mouseDownWell = well;
+        clearSelection();
+        well.classList.add('selecting');
+        selectedWells.push(well.getAttribute('data-well-id'));
+      });
+
+      document.addEventListener('mousemove', function(e) {
+        if (!isDragging) return;
+        dragMoved = true;
+        var el = document.elementFromPoint(e.clientX, e.clientY);
+        var well = el && (el.classList.contains('plate-well') ? el : (el.closest ? el.closest('.plate-well') : null));
+        if (well) {
+          var wid = well.getAttribute('data-well-id');
+          if (wid && selectedWells.indexOf(wid) === -1) {
+            selectedWells.push(wid);
+            well.classList.add('selecting');
+          }
+        }
+      });
+
+      document.addEventListener('mouseup', function(e) {
+        if (!isDragging) return;
+        isDragging = false;
+        var count = selectedWells.length;
+        var captured = selectedWells.slice();
+        clearSelection();
+        if (count === 0) return;
+        if (!dragMoved || count === 1) {
+          if (mouseDownWell) {
+            var wid = mouseDownWell.getAttribute('data-well-id');
+            if (wid) Shiny.setInputValue('clicked_well', wid, {priority: 'event'});
+          }
+        } else {
+          Shiny.setInputValue('drag_selected_wells', captured, {priority: 'event'});
+        }
+        mouseDownWell = null;
+      });
+
+      document.addEventListener('selectstart', function(e) {
+        if (isDragging) e.preventDefault();
+      });
+    })();
+
+    // Copy plate text to clipboard
+    function copyPlateText() {
+      var el = document.getElementById('plate_copy_text');
+      if (!el) return;
+      navigator.clipboard.writeText(el.value).then(function() {
+        var btn = document.getElementById('copy_plate_btn');
+        if (btn) { btn.innerText = 'Copied!'; setTimeout(function(){ btn.innerText = 'Copy to Clipboard'; }, 2000); }
+      });
+    }
+    Shiny.addCustomMessageHandler('updatePlateText', function(text) {
+      var el = document.getElementById('plate_copy_text');
+      if (el) el.value = text;
     });
   ")
 
@@ -49,13 +126,25 @@ create_ui <- function() {
       text-align: left; display: inline-block; }
     .beta-badge { font-size: 10px; background: #ffc107; color: #000; padding: 2px 6px;
       border-radius: 3px; vertical-align: super; font-weight: bold; margin-left: 4px; }
+    .plate-well.excluded { background-color: #e5e7eb; color: #9ca3af; opacity: 0.45; }
+    .plate-well.heatmap-well { color: transparent; }
+    .plate-well.selecting { outline: 3px solid #f59e0b; outline-offset: 1px; opacity: 0.85; }
+    .unassigned-warning { background:#fef9c3; border:1px solid #fbbf24; border-radius:4px;
+      padding:8px 12px; font-size:13px; margin-bottom:8px; }
   ")
 
   navbarPage(
-    title = HTML("ELISA Analyzer <span class='beta-badge'>BETA</span>"),
+    title = tags$span("ELISA Analyzer", tags$span(class="beta-badge", "BETA")),
+    windowTitle = "ELISA Analyzer",
     id = "mainNav",
     theme = shinythemes::shinytheme("yeti"),
-    header = tags$head(tags$script(custom_js), tags$style(custom_css)),
+    header = tags$head(
+      tags$link(rel="preconnect", href="https://fonts.googleapis.com"),
+      tags$link(rel="preconnect", href="https://fonts.gstatic.com", crossorigin=""),
+      tags$link(href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Sans:wght@400;600&family=JetBrains+Mono:wght@400;700&display=swap", rel="stylesheet"),
+      tags$link(rel="stylesheet", href="https://apps.bioinfospace.com/shared/bioinfospace-brutalism.css?v=2"),
+      tags$script(custom_js), tags$style(custom_css)
+    ),
 
     # =========================================================================
     # TAB 1 - Upload & Analyze
@@ -126,6 +215,32 @@ create_ui <- function() {
         )
       ),
 
+      # Paste from plate reader / Excel
+      wellPanel(
+        tags$details(
+          tags$summary(tags$strong(icon("paste"), " Paste from Plate Reader / Excel")),
+          br(),
+          p(class = "text-muted small",
+            "Paste directly from a plate reader export or Excel. Accepts:",
+            tags$ul(
+              tags$li("Plate grid format: rows A–H, columns 1–12 (OD values only)"),
+              tags$li("Long/tabular format: paste with headers (Well ID, OD, Sample Type, etc.)")
+            )
+          ),
+          textAreaInput("paste_data_text", NULL,
+                        placeholder = "Paste your data here (tab-separated from Excel or plate reader)...",
+                        rows = 8, width = "100%"),
+          fluidRow(
+            column(6, actionButton("process_paste", "Parse & Load",
+                                   icon = icon("upload"), class = "btn btn-primary")),
+            column(6, actionButton("clear_paste", "Clear",
+                                   icon = icon("xmark"), class = "btn btn-default"))
+          ),
+          br(),
+          uiOutput("pasteParseStatus")
+        )
+      ),
+
       # Parameters (shown after file upload)
       conditionalPanel(
         condition = "output.fileUploaded",
@@ -185,6 +300,14 @@ create_ui <- function() {
             column(4, checkboxInput("skip_normalization", "Skip B0/NSB Normalization", value = FALSE)),
             column(4, checkboxInput("log_transform",      "Log-Transform Concentrations", value = TRUE)),
             column(4, checkboxInput("remove_unlabeled",   "Remove Unlabeled Samples", value = TRUE))
+          ),
+          fluidRow(
+            column(12,
+              checkboxInput("normalize_per_plate",
+                            tags$span("Per-plate B/B0% normalization",
+                                      tags$small(class="text-muted", " — use when combining multiple plates into one file")),
+                            value = FALSE)
+            )
           ),
 
           # Advanced options (collapsible)
@@ -277,29 +400,97 @@ create_ui <- function() {
           )
         ),
 
-        # Standard curve plot
-        wellPanel(
-          h4(icon("chart-area"), "Standard Curve Plot"),
-          fluidRow(
-            column(8,
-              radioButtons("plotModelChoice", "Model:",
-                           choices = c("Combined Models" = "combined",
-                                       "4PL Model"       = "4pl",
-                                       "5PL Model"       = "5pl",
-                                       "Linear Model"    = "linear"),
-                           selected = "combined",
-                           inline   = TRUE)
-            ),
-            column(2,
-              checkboxInput("showReliabilityColors",
-                            "Color code unreliable", value = TRUE)
-            ),
-            column(2,
-              checkboxInput("flipAxes",
-                            "OD \u2192 Concentration", value = FALSE)
+        # Plot + Options side by side
+        fluidRow(
+          # Standard curve plot (left)
+          column(8,
+            wellPanel(
+              h4(icon("chart-area"), "Standard Curve Plot"),
+              fluidRow(
+                column(6,
+                  radioButtons("plotModelChoice", "Model:",
+                    choices = c("Combined Models" = "combined",
+                                "4PL Model"       = "4pl",
+                                "5PL Model"       = "5pl",
+                                "Linear Model"    = "linear"),
+                    selected = "combined", inline = TRUE)
+                ),
+                column(2,
+                  checkboxInput("showReliabilityColors", "Highlight unreliable", value = TRUE)
+                ),
+                column(2,
+                  checkboxInput("colorSamplesIndividually", "Color by sample", value = FALSE)
+                ),
+                column(2,
+                  checkboxInput("flipAxes", "Flip axes", value = FALSE)
+                )
+              ),
+              uiOutput("sampleLabelWarning"),
+              uiOutput("standardCurvePlotWrapper")
             )
           ),
-          plotlyOutput("standardCurvePlot", height = "600px")
+          # Plot Options (right) — default open
+          column(4,
+            wellPanel(
+              h4(icon("palette"), "Plot Options"),
+              selectInput("plotTheme", "Theme",
+                choices = c("Cowplot (2-axis)" = "cowplot",
+                            "Prism"            = "prism",
+                            "Minimal"          = "minimal",
+                            "Classic"          = "classic",
+                            "Black & White"    = "bw"),
+                selected = "cowplot"),
+              selectInput("plotFont", "Font",
+                choices = c("Arial"           = "Arial",
+                            "Helvetica"       = "Helvetica",
+                            "Times New Roman" = "Times New Roman",
+                            "Georgia"         = "Georgia",
+                            "Courier New"     = "Courier New"),
+                selected = "Arial"),
+              fluidRow(
+                column(6, sliderInput("plotPointSize", "Point Size",  min=1, max=6, value=3, step=0.5)),
+                column(6, sliderInput("plotLineSize",  "Line Width",   min=0.3, max=3, value=1.2, step=0.1))
+              ),
+              h5("Colors"),
+              fluidRow(
+                column(4,
+                  tags$label("Standards"),
+                  tags$input(type="color", id="std_color", value="#dc2626",
+                    class="form-control", style="height:38px;padding:2px;cursor:pointer;",
+                    oninput="Shiny.setInputValue('std_color', this.value)")
+                ),
+                column(4,
+                  tags$label("Samples"),
+                  tags$input(type="color", id="sample_color", value="#2563eb",
+                    class="form-control", style="height:38px;padding:2px;cursor:pointer;",
+                    oninput="Shiny.setInputValue('sample_color', this.value)")
+                ),
+                column(4,
+                  tags$label("Unreliable"),
+                  tags$input(type="color", id="unreliable_color", value="#eab308",
+                    class="form-control", style="height:38px;padding:2px;cursor:pointer;",
+                    oninput="Shiny.setInputValue('unreliable_color', this.value)")
+                )
+              ),
+              hr(),
+              textInput("plotTitle",  "Plot Title",   placeholder = "Auto-generated"),
+              textInput("plotXLabel", "X Axis Label", placeholder = "Auto-generated"),
+              textInput("plotYLabel", "Y Axis Label", placeholder = "Auto-generated"),
+              fluidRow(
+                column(6, checkboxInput("showR2",      "Show R²",           value = TRUE)),
+                column(6, checkboxInput("showXErrbar", "X-axis error bars",  value = FALSE))
+              ),
+              checkboxInput("showCI", "Show 95% CI band", value = FALSE),
+              checkboxInput("showCI", "Show 95% CI band", value = FALSE),
+              hr(),
+              h5("Download Size"),
+              fluidRow(
+                column(6, numericInput("plotDlWidth",  "Width (in)",  value = 8, min = 3, max = 20, step = 0.5)),
+                column(6, numericInput("plotDlHeight", "Height (in)", value = 6, min = 3, max = 16, step = 0.5))
+              ),
+              sliderInput("plotHeight", "Preview Height (px)", min=400, max=900, value=600, step=50)
+            )
+          )
         ),
 
         # Quick download
@@ -336,27 +527,73 @@ create_ui <- function() {
       conditionalPanel(
         condition = "output.fileUploaded",
 
+        # View mode toggle
         wellPanel(
-          h4(icon("grip"), "96-Well Plate Layout"),
-          p(class = "text-muted small",
-            "Visual representation of your plate layout based on uploaded data. ",
-            "Wells are color-coded by sample type."),
-          uiOutput("plateViewOutput")
+          fluidRow(
+            column(6, radioButtons("plateViewMode", "Display Mode:",
+              choices = c("Sample Type (colors)" = "type", "OD Heatmap" = "heatmap"),
+              selected = "type", inline = TRUE)),
+            column(3, uiOutput("plateFormatSelector")),
+            column(3, tags$div(style="margin-top:25px;",
+              actionButton("excludeSelectedWells", "Exclude Selected",
+                           icon=icon("ban"), class="btn btn-warning btn-sm"),
+              actionButton("restoreAllWells", "Restore All",
+                           icon=icon("rotate-right"), class="btn btn-default btn-sm"),
+              uiOutput("autoLabelBtn")))
+          )
+        ),
+
+        # Unassigned wells warning
+    uiOutput("unassigned_warning"),
+
+    # Side by side: plate visual (left) + table (right)
+        fluidRow(
+          column(6,
+            wellPanel(
+              uiOutput("plateViewOutput"),
+              br(),
+              uiOutput("plateLegend")
+            )
+          ),
+          column(6,
+            wellPanel(
+              h5(icon("table"), "Plate Values"),
+              p(class="text-muted small", "Click a well in the plate view to assign its type."),
+              uiOutput("plateTableOutput")
+            )
+          )
         ),
 
         wellPanel(
-          h4(icon("list"), "Plate Summary"),
+          h5("Plate Summary"),
           fluidRow(
             column(6, tableOutput("plateSummaryTable")),
-            column(6, uiOutput("plateLegend"))
+            column(6,
+              div(class="text-muted small", style="margin-top:8px;",
+                p(icon("circle", style="color:#dc3545"), " Standard"),
+                p(icon("circle", style="color:#0d6efd"), " Sample"),
+                p(icon("circle", style="color:#198754"), " Control (NSB/B0/QC)"),
+                p(icon("circle", style="color:#6c757d"), " Blank"),
+                p(icon("ban", style="color:#aaa"), " Excluded")
+              )
+            )
+          ),
+          fluidRow(
+            column(4, downloadButton("download_long_format", "Download as Long Format (.xlsx)", class="btn btn-success btn-sm btn-block")),
+            column(4, downloadButton("download_plate_format", "Download as Plate Grid (.xlsx)", class="btn btn-default btn-sm btn-block")),
+            column(4,
+              tags$textarea(id="plate_copy_text", style="position:absolute;left:-9999px;", ""),
+              actionButton("copy_plate_btn", "Copy Plate (Tab-Separated)",
+                           class="btn btn-default btn-sm btn-block",
+                           onclick="copyPlateText()", id="copy_plate_btn_el"))
           )
         )
       ),
 
       conditionalPanel(
         condition = "!output.fileUploaded",
-        div(class = "text-center", style = "padding: 4rem 1.5rem; color: #999;",
-          icon("grip", class = "fa-3x"),
+        div(class="text-center", style="padding:4rem 1.5rem;color:#999;",
+          icon("grip", class="fa-3x"),
           h4("No data loaded"),
           p("Upload data or load example data to see the plate layout here.")
         )
