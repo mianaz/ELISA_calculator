@@ -14,7 +14,8 @@
 #' @param multiplier SD multiplier (default: 3 for LOD)
 #' @return LOD value (concentration units if curve-based, OD if signal-based)
 #' @export
-calculate_lod <- function(blank_values = NULL, model = NULL, method = "signal", multiplier = 3) {
+calculate_lod <- function(blank_values = NULL, model = NULL, method = "signal", multiplier = 3,
+                          direction = 1, blank_source = "blank") {
   if (method == "signal" && !is.null(blank_values)) {
     # Signal-based LOD: Mean + 3*SD
     blank_values <- blank_values[!is.na(blank_values)]
@@ -27,7 +28,9 @@ calculate_lod <- function(blank_values = NULL, model = NULL, method = "signal", 
     mean_blank <- mean(blank_values, na.rm = TRUE)
     sd_blank <- sd(blank_values, na.rm = TRUE)
 
-    lod_signal <- mean_blank + multiplier * sd_blank
+    # direction = +1: signal rises with analyte (blank + k*SD).
+    # direction = -1: competitive assay, signal falls with analyte (zero-std - k*SD).
+    lod_signal <- mean_blank + direction * multiplier * sd_blank
 
     # If model provided, convert to concentration
     if (!is.null(model) && model$is_valid()) {
@@ -39,7 +42,9 @@ calculate_lod <- function(blank_values = NULL, model = NULL, method = "signal", 
           method = "signal-based",
           mean_blank = mean_blank,
           sd_blank = sd_blank,
-          multiplier = multiplier
+          multiplier = multiplier,
+          direction = direction,
+          blank_source = blank_source
         ))
       }, error = function(e) {
         return(list(
@@ -49,6 +54,8 @@ calculate_lod <- function(blank_values = NULL, model = NULL, method = "signal", 
           mean_blank = mean_blank,
           sd_blank = sd_blank,
           multiplier = multiplier,
+          direction = direction,
+          blank_source = blank_source,
           error = e$message
         ))
       })
@@ -60,7 +67,9 @@ calculate_lod <- function(blank_values = NULL, model = NULL, method = "signal", 
       method = "signal-based",
       mean_blank = mean_blank,
       sd_blank = sd_blank,
-      multiplier = multiplier
+      multiplier = multiplier,
+      direction = direction,
+      blank_source = blank_source
     ))
 
   } else if (method == "curve" && !is.null(model)) {
@@ -92,7 +101,8 @@ calculate_lod <- function(blank_values = NULL, model = NULL, method = "signal", 
 #' @export
 calculate_loq <- function(blank_values = NULL, standards_data = NULL, model = NULL,
                           method = "signal", multiplier = 10,
-                          cv_threshold = 0.20, accuracy_range = c(80, 120)) {
+                          cv_threshold = 0.20, accuracy_range = c(80, 120),
+                          direction = 1, blank_source = "blank") {
 
   if (method == "signal" && !is.null(blank_values)) {
     # Signal-based LOQ
@@ -106,7 +116,7 @@ calculate_loq <- function(blank_values = NULL, standards_data = NULL, model = NU
     mean_blank <- mean(blank_values, na.rm = TRUE)
     sd_blank <- sd(blank_values, na.rm = TRUE)
 
-    loq_signal <- mean_blank + multiplier * sd_blank
+    loq_signal <- mean_blank + direction * multiplier * sd_blank
 
     # Convert to concentration if model provided
     if (!is.null(model) && model$is_valid()) {
@@ -161,6 +171,7 @@ calculate_loq <- function(blank_values = NULL, standards_data = NULL, model = NU
       # Find lowest standard meeting criteria
       valid_stds <- std_stats %>%
         filter(
+          Concentration > 0,
           cv <= cv_threshold,
           accuracy >= accuracy_range[1],
           accuracy <= accuracy_range[2]
@@ -235,6 +246,7 @@ calculate_uloq <- function(standards_data, model = NULL,
       # Find highest standard meeting criteria
       valid_stds <- std_stats %>%
         filter(
+          Concentration > 0,
           cv <= cv_threshold,
           accuracy >= accuracy_range[1],
           accuracy <= accuracy_range[2]
@@ -283,9 +295,22 @@ calculate_uloq <- function(standards_data, model = NULL,
 #' @param config Configuration list
 #' @return List with LOD, LOQ, ULOQ and metadata
 #' @export
-calculate_assay_limits <- function(blank_values, standards_data, model, config = NULL) {
+calculate_assay_limits <- function(blank_values, standards_data, model, config = NULL,
+                                   zero_values = NULL, competitive = FALSE) {
   if (is.null(config)) {
     config <- get_default_config()
+  }
+
+  # Kits without Blank wells: use the replicates of the 0 standard (B0) as the
+  # reference signal. In a competitive assay the signal falls as analyte rises,
+  # so the detection threshold sits BELOW the zero standard (mean - k*SD).
+  direction <- 1
+  blank_source <- "blank"
+  have_blank <- !is.null(blank_values) && sum(!is.na(blank_values)) >= 2
+  if (!have_blank && !is.null(zero_values) && sum(!is.na(zero_values)) >= 2) {
+    blank_values <- zero_values
+    blank_source <- "zero-standard"
+    direction <- if (isTRUE(competitive)) -1 else 1
   }
 
   # Calculate LOD
@@ -293,7 +318,9 @@ calculate_assay_limits <- function(blank_values, standards_data, model, config =
     blank_values = blank_values,
     model = model,
     method = "signal",
-    multiplier = DEFAULT_LOD_MULTIPLIER
+    multiplier = DEFAULT_LOD_MULTIPLIER,
+    direction = direction,
+    blank_source = blank_source
   )
 
   # Calculate LOQ using both methods
@@ -301,7 +328,9 @@ calculate_assay_limits <- function(blank_values, standards_data, model, config =
     blank_values = blank_values,
     model = model,
     method = "signal",
-    multiplier = DEFAULT_LOQ_MULTIPLIER
+    multiplier = DEFAULT_LOQ_MULTIPLIER,
+    direction = direction,
+    blank_source = blank_source
   )
 
   loq_accuracy <- calculate_loq(
@@ -379,9 +408,10 @@ calculate_back_calculation <- function(standards_data, model) {
           model$predict_concentration(r)
         }, error = function(e) NA)
       }),
-      Percent_RE = ((Back_Calculated_Conc - Concentration) / Concentration) * 100,
-      Recovery_Pct = (Back_Calculated_Conc / Concentration) * 100,
-      Accuracy_Pass = abs(Percent_RE) <= DEFAULT_ACCURACY_THRESHOLD
+      # Recovery / %RE are undefined at concentration 0 (the zero standard / B0)
+      Percent_RE = ifelse(Concentration > 0, ((Back_Calculated_Conc - Concentration) / Concentration) * 100, NA_real_),
+      Recovery_Pct = ifelse(Concentration > 0, (Back_Calculated_Conc / Concentration) * 100, NA_real_),
+      Accuracy_Pass = ifelse(Concentration > 0, abs(Percent_RE) <= DEFAULT_ACCURACY_THRESHOLD, NA)
     )
 
   return(result)
@@ -425,6 +455,16 @@ summarize_standards_with_accuracy <- function(standards_data, model) {
       summary$Mean_Recovery_Pct <= DEFAULT_RECOVERY_MAX,
     "PASS", "FAIL"
   )
+
+  # Zero standard (B0): accuracy is undefined, so judge replicate precision only
+  is_zero <- !is.na(summary$Concentration) & summary$Concentration <= 0
+  if (any(is_zero)) {
+    summary$QC_Status[is_zero] <- ifelse(summary$CV_Pct[is_zero] <= (DEFAULT_CV_THRESHOLD * 100), "PASS", "FAIL")
+    summary$QC_Status[is.na(summary$QC_Status)] <- "FAIL"
+    summary$Mean_Recovery_Pct[is_zero] <- NA_real_
+    summary$Mean_Percent_RE[is_zero] <- NA_real_
+    summary$Mean_Back_Calc[is_zero] <- NA_real_
+  }
 
   return(summary)
 }
@@ -702,7 +742,12 @@ calculate_weights <- function(data, weight_type = "none") {
   } else if (weight_type == "1/Y^2" || weight_type == WEIGHT_1_Y2) {
     data$Weights <- 1 / (data$Response + 0.001)^2
   } else if (weight_type == "1/X^2" || weight_type == WEIGHT_1_X2) {
-    data$Weights <- 1 / (data$Concentration + 0.001)^2
+    # Zero standard would get weight 1/0.001^2 (dominating the fit); give it the
+    # weight of the lowest positive standard instead.
+    pos <- data$Concentration[!is.na(data$Concentration) & data$Concentration > 0]
+    x_eff <- data$Concentration
+    if (length(pos) > 0) x_eff[!is.na(x_eff) & x_eff <= 0] <- min(pos)
+    data$Weights <- 1 / (x_eff + 0.001)^2
   } else {
     warning(paste("Unknown weight type:", weight_type, "- using no weighting"))
     data$Weights <- 1

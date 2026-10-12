@@ -281,13 +281,20 @@ analyze_elisa <- function(
       NULL
     }
 
+    # Replicates of the 0 standard: fallback reference signal when there are no Blank wells
+    zero_response <- if (COL_RESPONSE %in% colnames(standards)) {
+      standards[[COL_RESPONSE]][!is.na(standards[[COL_CONCENTRATION]]) & standards[[COL_CONCENTRATION]] == 0]
+    } else NULL
+
     # Calculate assay limits
     tryCatch({
       assay_limits <- calculate_assay_limits(
         blank_values = blank_response,
         standards_data = standards,
         model = model_selection$best_model,
-        config = config
+        config = config,
+        zero_values = zero_response,
+        competitive = identical(final_assay_type, ASSAY_TYPE_COMPETITIVE)
       )
 
       if (!is.null(assay_limits$lod$concentration)) {
