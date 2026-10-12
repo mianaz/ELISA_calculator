@@ -345,3 +345,67 @@ create_processed_data <- function(raw_data, standards, samples, controls,
     config = config
   )
 }
+
+#' Normalize all wells to per-plate B/B0% to remove plate-to-plate variation
+#'
+#' @param data Cleaned data frame (standardized column names already mapped)
+#' @param od_column Name of the OD column to normalize (COL_OD or COL_OD_CORRECTED)
+#' @param b0_label Sample Type label for B0 wells
+#' @param nsb_label Sample Type label for NSB wells
+#' @return Data frame with od_column replaced by per-plate B/B0% values
+normalize_per_plate_bb0 <- function(data, od_column, b0_label = "B0", nsb_label = "NSB") {
+  well_ids <- data[[COL_WELL]]
+
+  # Detect plate boundaries: each time a well ID repeats, a new plate starts
+  plates <- integer(nrow(data))
+  current_plate <- 1L
+  seen <- character(0)
+  for (i in seq_len(nrow(data))) {
+    wid <- well_ids[i]
+    if (!is.na(wid) && wid %in% seen) {
+      current_plate <- current_plate + 1L
+      seen <- character(0)
+    }
+    plates[i] <- current_plate
+    if (!is.na(wid)) seen <- c(seen, wid)
+  }
+  data[[".plate"]] <- plates
+  n_plates <- max(plates)
+  message("  Detected ", n_plates, " plate(s)")
+
+  bb0_vals <- rep(NA_real_, nrow(data))
+
+  for (p in seq_len(n_plates)) {
+    idx <- which(data[[".plate"]] == p)
+    plate <- data[idx, ]
+    od <- plate[[od_column]]
+    type <- plate[[COL_TYPE]]
+
+    b0_od  <- od[!is.na(type) & type == b0_label  & !is.na(od)]
+    nsb_od <- od[!is.na(type) & type == nsb_label & !is.na(od)]
+
+    b0_mean  <- if (length(b0_od)  > 0) mean(b0_od)  else NA_real_
+    nsb_mean <- if (length(nsb_od) > 0) mean(nsb_od) else 0
+
+    if (is.na(b0_mean)) {
+      message("  Plate ", p, ": no B0 wells found — leaving OD unchanged")
+      bb0_vals[idx] <- od
+      next
+    }
+
+    denom <- b0_mean - nsb_mean
+    if (abs(denom) < 1e-10) {
+      message("  Plate ", p, ": B0-NSB range too small — leaving OD unchanged")
+      bb0_vals[idx] <- od
+      next
+    }
+
+    bb0_vals[idx] <- (od - nsb_mean) / denom * 100
+    message("  Plate ", p, ": B0=", round(b0_mean, 4), "  NSB=", round(nsb_mean, 4),
+            "  -> range ", round(denom, 4))
+  }
+
+  data[[od_column]] <- bb0_vals
+  data[[".plate"]] <- NULL
+  data
+}

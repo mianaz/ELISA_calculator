@@ -103,7 +103,7 @@ detect_column <- function(data, patterns, default_col = NULL) {
 #' @param new_name New standardized column name
 #' @return Data frame with renamed column
 rename_column_safe <- function(data, old_name, new_name) {
-  if (old_name %in% colnames(data) && old_name != new_name) {
+  if (length(old_name) == 1 && !is.na(old_name) && old_name %in% colnames(data) && old_name != new_name) {
     colnames(data)[colnames(data) == old_name] <- new_name
   }
   return(data)

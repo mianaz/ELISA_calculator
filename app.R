@@ -7,6 +7,7 @@ library(readr)
 library(writexl)
 library(drc)
 library(ggplot2)
+library(ggprism)
 library(dplyr)
 library(tidyr)
 library(ggrepel)
@@ -23,6 +24,145 @@ source("R/analysis/analyzer.R")  # Generalized analyzer with all dependencies
 # Create UI
 ui <- create_ui()
 
+# ---- Top-level helper: OD -> hex color for heatmap mode ----
+od_to_hex <- function(od_val, well_type_map = NULL) {
+  od_val <- max(0, min(3, as.numeric(od_val)))
+  intensity <- round(od_val / 3 * 255)
+  r <- 255 - round(intensity * 0.8)
+  g <- 255 - round(intensity * 0.6)
+  b <- 255
+  sprintf("rgb(%d,%d,%d)", r, g, b)
+}
+
+# ---- Top-level helper: render plate HTML (used by plateViewOutput) ----
+render_plate_html <- function(well_type_map, well_od_map, input_obj,
+                               parsed_plate_val = NULL, well_assigns = list(),
+                               excluded = character(0), mode = "type",
+                               plate_format = "auto") {
+
+  std_label   <- if (!is.null(input_obj)) input_obj$std_label   %||% "Standard" else "Standard"
+  blank_label <- if (!is.null(input_obj)) input_obj$blank_label %||% "Blank"    else "Blank"
+  nsb_label   <- if (!is.null(input_obj)) input_obj$nsb_label   %||% "NSB"      else "NSB"
+  b0_label    <- if (!is.null(input_obj)) input_obj$b0_label    %||% "B0"       else "B0"
+
+  classify_well <- function(type) {
+    if (is.null(type) || is.na(type) || type == "" || type == "Empty") return("empty")
+    if (type == std_label || type == "Standard") return("std")
+    if (type == blank_label || type == "Blank") return("blank")
+    if (type %in% c(nsb_label, b0_label, "NSB", "B0", "QC_Low", "QC_Mid", "QC_High")) return("control")
+    return("sample")
+  }
+
+  # Determine plate dimensions: respect plate_format selector, then auto-detect, then default 96-well
+  if (!is.null(parsed_plate_val$plate_corrected)) {
+    pm <- parsed_plate_val$plate_corrected
+    row_labels <- LETTERS[1:nrow(pm)]
+    col_labels <- 1:ncol(pm)
+  } else if (!is.null(plate_format) && plate_format != "auto") {
+    dims <- switch(plate_format,
+      "96"  = c(8, 12), "384" = c(16, 24),
+      "48"  = c(6,  8), "24"  = c(4,   6), c(8, 12))
+    row_labels <- LETTERS[1:dims[1]]
+    col_labels <- 1:dims[2]
+  } else {
+    # Auto-detect: accept any letter + 1-2 digits as a well ID
+    all_well_ids <- c(names(well_type_map), names(well_od_map), names(well_assigns))
+    all_well_ids <- unique(all_well_ids[grepl("^[A-Za-z][0-9]{1,2}$", all_well_ids)])
+    if (length(all_well_ids) > 0) {
+      row_letters <- toupper(gsub("[0-9]+$", "", all_well_ids))
+      col_nums    <- suppressWarnings(as.integer(gsub("^[A-Za-z]+", "", all_well_ids)))
+      max_row_idx <- max(match(row_letters, LETTERS), na.rm = TRUE)
+      min_row_idx <- min(match(row_letters, LETTERS), na.rm = TRUE)
+      max_col     <- max(col_nums, na.rm = TRUE)
+      if (!is.finite(max_row_idx)) { max_row_idx <- 8; min_row_idx <- 1 }
+      if (!is.finite(max_col))     max_col <- 12
+      # Snap to standard plate only when data fits neatly within one
+      fits_96  <- max_row_idx <= 8  && max_col <= 12
+      fits_384 <- max_row_idx <= 16 && max_col <= 24
+      fits_48  <- max_row_idx <= 6  && max_col <= 8
+      fits_24  <- max_row_idx <= 4  && max_col <= 6
+      if (fits_24) {
+        plate_rows_n <- 4; plate_cols_n <- 6
+      } else if (fits_48) {
+        plate_rows_n <- 6; plate_cols_n <- 8
+      } else if (fits_96) {
+        plate_rows_n <- 8; plate_cols_n <- 12
+      } else if (fits_384) {
+        plate_rows_n <- 16; plate_cols_n <- 24
+      } else {
+        # Non-standard: render exactly the data range
+        plate_rows_n <- max_row_idx
+        plate_cols_n <- max_col
+      }
+      # Always start rows from A (row 1), not from min_row_idx
+      row_labels <- LETTERS[1:plate_rows_n]
+      col_labels <- 1:plate_cols_n
+    } else {
+      row_labels <- LETTERS[1:8]; col_labels <- 1:12
+    }
+  }
+
+  plate_rows <- list()
+
+  # Column headers
+  header_items <- list(tags$span(class = "plate-row-label", ""))
+  for (col in col_labels) {
+    header_items <- c(header_items, list(tags$span(class = "plate-col-header", as.character(col))))
+  }
+  plate_rows <- c(plate_rows, list(div(header_items)))
+
+  for (row in row_labels) {
+    row_items <- list(tags$span(class = "plate-row-label", row))
+    for (col in col_labels) {
+      well_id <- paste0(row, col)
+      type    <- if (!is.null(well_type_map)) well_type_map[well_id] else NA_character_
+      # Apply manual assignment override
+      if (!is.null(well_assigns) && !is.null(well_assigns[[well_id]])) type <- well_assigns[[well_id]]
+      od_val  <- if (!is.null(well_od_map)) well_od_map[well_id] else NA_real_
+
+      # Also check parsed plate matrix for OD value
+      if (is.null(od_val) || is.na(od_val %||% NA)) {
+        if (!is.null(parsed_plate_val$plate_corrected)) {
+          r_idx <- which(LETTERS == row)
+          if (length(r_idx) > 0 && r_idx <= nrow(parsed_plate_val$plate_corrected) &&
+              col <= ncol(parsed_plate_val$plate_corrected)) {
+            od_val <- parsed_plate_val$plate_corrected[r_idx, col]
+          }
+        }
+      }
+
+      is_excluded <- well_id %in% excluded
+      well_class <- if (is_excluded) "excluded" else classify_well(type)
+      type_label <- if (!is.null(type) && !is.na(type %||% NA) && type != "") type else "Empty"
+      od_label   <- if (!is.null(od_val) && !is.na(od_val %||% NA)) sprintf("%.4f", as.numeric(od_val)) else ""
+      tooltip    <- paste0(well_id, ": ", type_label,
+                           if (od_label != "") paste0(" | OD=", od_label) else "")
+      # Heatmap mode: use OD value to set background color
+      extra_style <- ""
+      if (mode == "heatmap" && !is.null(od_val) && !is.na(od_val %||% NA)) {
+        od_num <- as.numeric(od_val)
+        if (!is_excluded) {
+          well_class <- "heatmap-well"
+          extra_style <- paste0("background-color:", od_to_hex(od_num), ";")
+        }
+      }
+
+      row_items <- c(row_items, list(
+        tags$span(
+          class          = paste("plate-well", well_class),
+          `data-well-id` = well_id,
+          title          = tooltip,
+          style          = extra_style
+          # No display text — color-code only; OD shown in tooltip and right-panel table
+        )
+      ))
+    }
+    plate_rows <- c(plate_rows, list(div(row_items)))
+  }
+
+  div(class = "plate-container", plate_rows)
+}
+
 # Define server logic
 server <- function(input, output, session) {
   # Reactive values to store analysis results
@@ -30,6 +170,73 @@ server <- function(input, output, session) {
   raw_data <- reactiveVal(NULL)
   parsed_plate <- reactiveVal(NULL)  # Stores parsed plate grid data from plate reader files
   exclusion_audit_trail <- reactiveVal(list(entries = list(), created_at = Sys.time()))
+  well_assignments <- reactiveVal(list())  # Manual well type overrides from Plate View click
+  excluded_wells <- reactiveVal(character(0))  # Wells excluded from analysis
+
+  # ---- Paste data parser ----
+  parse_pasted_data <- function(text) {
+    text <- trimws(gsub("\r\n", "\n", gsub("\r", "\n", text)))
+    if (nchar(text) == 0) return(list(format = "error", message = "No data pasted"))
+
+    lines <- strsplit(text, "\n")[[1]]
+    lines <- trimws(lines)
+    lines <- lines[nchar(lines) > 0]
+    if (length(lines) < 2) return(list(format = "error", message = "Not enough rows"))
+
+    # Split by tab
+    rows <- lapply(lines, function(l) trimws(strsplit(l, "\t")[[1]]))
+
+    # Detect plate format: first row has numeric column headers (1-12), data rows start A-H
+    first_row <- rows[[1]]
+    maybe_nums <- suppressWarnings(as.numeric(first_row[first_row != ""]))
+    data_row_labels <- trimws(sapply(rows[-1], `[`, 1))
+    is_plate <- sum(!is.na(maybe_nums)) >= 6 &&
+                all(toupper(data_row_labels) %in% c(LETTERS[1:8], ""))
+
+    if (is_plate) {
+      # Plate grid format
+      start_col <- if (first_row[1] == "" || is.na(suppressWarnings(as.numeric(first_row[1])))) 2L else 1L
+      plate_mat <- matrix(NA_real_, 8, 12)
+      for (i in seq_along(rows[-1])) {
+        if (i > 8) break
+        r <- rows[[i + 1]]
+        row_letter <- toupper(trimws(r[1]))
+        row_idx <- which(LETTERS[1:8] == row_letter)
+        if (length(row_idx) == 0) next
+        vals <- suppressWarnings(as.numeric(r[start_col:min(length(r), start_col + 11)]))
+        for (j in seq_along(vals)) {
+          if (j > 12) break
+          plate_mat[row_idx, j] <- vals[j]
+        }
+      }
+      # Convert to long with Well ID + OD
+      result_rows <- list()
+      for (r in 1:8) {
+        for (c in 1:12) {
+          result_rows[[length(result_rows) + 1]] <- data.frame(
+            `Well ID`     = paste0(LETTERS[r], c),
+            OD            = plate_mat[r, c],
+            `Sample Type` = "",
+            check.names   = FALSE
+          )
+        }
+      }
+      df <- do.call(rbind, result_rows)
+      df <- df[!is.na(df$OD), ]
+      return(list(format = "plate", data = df, plate_matrix = plate_mat,
+                  message = paste("Plate grid parsed:", nrow(df), "wells with OD values")))
+    } else {
+      # Long / tabular format
+      tryCatch({
+        df <- as.data.frame(readr::read_tsv(
+          I(paste(lines, collapse = "\n")), show_col_types = FALSE))
+        return(list(format = "long", data = df,
+                    message = paste("Long format parsed:", nrow(df), "rows,", ncol(df), "columns")))
+      }, error = function(e) {
+        list(format = "error", message = paste("Parse error:", e$message))
+      })
+    }
+  }
 
   # Helper function to parse dilution factors from text input
   parse_dilution_factors <- function(text) {
@@ -258,7 +465,7 @@ server <- function(input, output, session) {
           type_col = input$type_col,
           conc_col = input$conc_col,
           od_col = input$od_col,
-          od_corr_col = if(input$od_corr_col == "None") input$od_col else input$od_corr_col,
+          od_corr_col = { ocv <- input$od_corr_col; if(is.null(ocv) || length(ocv) == 0 || isTRUE(ocv == "None")) input$od_col else ocv },
           use_corrected = input$use_corrected %||% FALSE,
           assay_type = input$assay_type %||% "auto",
           nsb_label = input$nsb_label %||% "NSB",
@@ -271,7 +478,8 @@ server <- function(input, output, session) {
           dilution_factors = dilution_factors,
           weight_type = input$weight_type %||% "none",
           models_to_fit = models,
-          calculate_limits = input$calculate_limits %||% TRUE
+          calculate_limits = input$calculate_limits %||% TRUE,
+          normalize_per_plate = input$normalize_per_plate %||% FALSE
         )
 
         incProgress(0.5, detail = "Generating outputs")
@@ -298,7 +506,10 @@ server <- function(input, output, session) {
         )
 
       }, error = function(e) {
-        # Display error to user
+        message("=== Analysis Error ===")
+        message("Message: ", e$message)
+        message("Call: ", paste(deparse(e$call), collapse=" "))
+        tryCatch(traceback(), error = function(e2) NULL)
         showNotification(
           paste("Error in analysis:", e$message),
           type = "error",
@@ -450,7 +661,8 @@ server <- function(input, output, session) {
           dilution_factors = dilution_factors,
           weight_type = input$weight_type %||% "none",
           models_to_fit = models,
-          calculate_limits = input$calculate_limits %||% TRUE
+          calculate_limits = input$calculate_limits %||% TRUE,
+          normalize_per_plate = input$normalize_per_plate %||% FALSE
         )
 
         incProgress(0.4, detail = "Complete")
@@ -475,6 +687,9 @@ server <- function(input, output, session) {
       })
 
     }, error = function(e) {
+      message("=== Example Data Error ===")
+      message("Message: ", e$message)
+      message("Call: ", paste(deparse(e$call), collapse=" "))
       showNotification(paste("Error loading example data:", e$message), type = "error", duration = 10)
     })
   }
@@ -501,84 +716,218 @@ server <- function(input, output, session) {
 
   # ============ Plate View Tab Outputs ============
 
-  # Generate 96-well plate visualization from uploaded data
+  # Generate plate visualization from uploaded data (with click support)
+  # Helper: check if a character vector contains real plate well IDs (e.g. A1, B12, P24)
+  is_valid_well_id <- function(x) grepl("^[A-Za-z][0-9]{1,2}$", as.character(x))
+
   output$plateViewOutput <- renderUI({
     req(raw_data())
-    data <- raw_data()
-
+    data     <- raw_data()
     well_col <- input$well_col
     type_col <- input$type_col
+    od_col   <- input$od_col
+    mode     <- input$plateViewMode %||% "type"
+    excluded <- excluded_wells()
 
-    if (is.null(well_col) || !well_col %in% colnames(data)) {
-      return(p(class = "text-muted", "Well ID column not found. Please check column mapping."))
-    }
+    no_well_msg <- tagList(
+      div(class = "text-center", style = "padding:2rem 1rem;color:#888;",
+        icon("circle-question", class = "fa-2x", style = "margin-bottom:.5rem;"),
+        p(strong("No well position data detected.")),
+        p(class = "small", "Your data is in long format without plate coordinates."),
+        p(class = "small", "To see a plate layout, your data needs a well column with IDs like A1, B2, H12, etc."),
+        p(class = "small text-muted", "You can still assign well positions manually by clicking cells above, or
+          paste plate-format data in the Upload tab.")
+      )
+    )
 
-    # Parse well positions (e.g., A1 -> row=A, col=1)
-    wells <- as.character(data[[well_col]])
-    types <- if (!is.null(type_col) && type_col %in% colnames(data)) {
-      as.character(data[[type_col]])
-    } else {
-      rep("Unknown", length(wells))
-    }
-
-    # Build a well->type lookup
-    well_type_map <- setNames(types, wells)
-
-    # Standard labels
-    std_label <- input$std_label %||% "Standard"
-    blank_label <- input$blank_label %||% "Blank"
-    nsb_label <- input$nsb_label %||% "NSB"
-    b0_label <- input$b0_label %||% "B0"
-
-    # Classify well type for coloring
-    classify_well <- function(type) {
-      if (is.na(type) || type == "") return("empty")
-      if (type == std_label) return("std")
-      if (type == blank_label) return("blank")
-      if (type %in% c(nsb_label, b0_label, "QC_Low", "QC_Mid", "QC_High")) return("control")
-      return("sample")
-    }
-
-    row_labels <- LETTERS[1:8]
-    col_labels <- 1:12
-
-    # Build plate HTML
-    plate_rows <- list()
-
-    # Column headers
-    header_items <- list(tags$span(class = "plate-row-label", ""))
-    for (col in col_labels) {
-      header_items <- c(header_items, list(
-        tags$span(class = "plate-col-header", as.character(col))
-      ))
-    }
-    plate_rows <- c(plate_rows, list(div(header_items)))
-
-    # Well rows
-    for (row in row_labels) {
-      row_items <- list(tags$span(class = "plate-row-label", row))
-      for (col in col_labels) {
-        well_id <- paste0(row, col)
-        type <- well_type_map[well_id]
-        well_class <- if (!is.na(type)) classify_well(type) else "empty"
-        tooltip <- if (!is.na(type) && type != "") {
-          paste0(well_id, ": ", type)
-        } else {
-          paste0(well_id, ": Empty")
-        }
-
-        row_items <- c(row_items, list(
-          tags$span(
-            class = paste("plate-well", well_class),
-            title = tooltip,
-            substr(well_id, 2, nchar(well_id))
-          )
+    # Case 1: no well column selected or it's not in the data
+    if (is.null(well_col) || !(well_col %in% colnames(data))) {
+      if (!is.null(parsed_plate())) {
+        return(tagList(
+          p(class = "text-info small", icon("info-circle"),
+            " OD values loaded from plate grid. Click a well to assign its sample type."),
+          render_plate_html(NULL, NULL, NULL, parsed_plate(), well_assignments(), excluded, mode)
         ))
       }
-      plate_rows <- c(plate_rows, list(div(row_items)))
+      return(no_well_msg)
     }
 
-    div(class = "plate-container", plate_rows)
+    wells <- as.character(data[[well_col]])
+
+    # Case 2: well column exists but values are not plate well IDs — show long-format message
+    valid_pct <- mean(is_valid_well_id(wells), na.rm = TRUE)
+    if (valid_pct < 0.5) {
+      return(no_well_msg)
+    }
+
+    types <- if (!is.null(type_col) && type_col %in% colnames(data)) as.character(data[[type_col]]) else rep("", length(wells))
+    ods   <- if (!is.null(od_col)   && od_col   %in% colnames(data)) data[[od_col]]               else rep(NA_real_, length(wells))
+
+    well_type_map <- setNames(types, wells)
+    well_od_map   <- setNames(ods,   wells)
+
+    assigns <- well_assignments()
+    for (w in names(assigns)) {
+      if (!grepl("_conc$", w)) well_type_map[[w]] <- assigns[[w]]
+    }
+
+    fmt <- input$plateFormat %||% "auto"
+    render_plate_html(well_type_map, well_od_map, input, parsed_plate(), well_assignments(), excluded, mode, plate_format = fmt)
+  })
+
+  # Plate format selector
+  output$plateFormatSelector <- renderUI({
+    req(raw_data())
+    selectInput("plateFormat", "Plate Format",
+                choices = c("Auto-detect" = "auto", "96-well (8×12)" = "96",
+                            "384-well (16×24)" = "384", "48-well (6×8)" = "48",
+                            "24-well (4×6)" = "24"),
+                selected = "auto")
+  })
+
+  # Unassigned wells warning: wells with OD data but no type assignment
+  output$unassigned_warning <- renderUI({
+    req(raw_data())
+    data     <- raw_data()
+    well_col <- input$well_col
+    type_col <- input$type_col
+    assigns  <- well_assignments()
+
+    if (is.null(well_col) || !well_col %in% colnames(data)) return(NULL)
+    wells <- as.character(data[[well_col]])
+    if (mean(is_valid_well_id(wells), na.rm = TRUE) < 0.5) return(NULL)
+
+    # Wells that have OD but no type info
+    has_type <- if (!is.null(type_col) && type_col %in% colnames(data)) {
+      types <- as.character(data[[type_col]])
+      !is.na(types) & types != "" & types != "NA"
+    } else {
+      rep(FALSE, length(wells))
+    }
+    unassigned <- wells[!has_type & !(wells %in% names(assigns))]
+    unassigned <- unassigned[is_valid_well_id(unassigned)]
+
+    if (length(unassigned) == 0) return(NULL)
+    div(class = "unassigned-warning",
+      icon("triangle-exclamation"), " ",
+      strong(length(unassigned), " well(s) have no sample type assigned"),
+      " (", paste(head(unassigned, 6), collapse = ", "),
+      if (length(unassigned) > 6) paste0("... +", length(unassigned) - 6, " more") else "",
+      "). Analysis continues using type column; assign types in plate view for visual clarity."
+    )
+  })
+
+  # Drag-select bulk assignment modal
+  observeEvent(input$drag_selected_wells, {
+    req(input$drag_selected_wells)
+    wells <- input$drag_selected_wells
+    if (length(wells) == 0) return()
+    well_label <- if (length(wells) <= 8) paste(wells, collapse = ", ") else
+                  paste0(paste(head(wells, 6), collapse = ", "), " ... +", length(wells) - 6, " more")
+    showModal(modalDialog(
+      title   = paste("Assign", length(wells), "Wells"),
+      p(strong("Selected: "), well_label),
+      selectInput("modal_bulk_type", "Assign as:",
+                  choices = c("Standard", "Sample", "Blank", "NSB", "B0", "QC_Low", "QC_Mid", "QC_High")),
+      footer  = tagList(
+        modalButton("Cancel"),
+        actionButton("modal_bulk_assign", "Assign All", class = "btn btn-primary")
+      ),
+      easyClose = TRUE
+    ))
+    # Store the selected wells for the observer below
+    session$userData$bulk_wells <- wells
+  })
+
+  observeEvent(input$modal_bulk_assign, {
+    wells <- session$userData$bulk_wells
+    type  <- input$modal_bulk_type
+    req(length(wells) > 0, !is.null(type))
+    assigns <- well_assignments()
+    for (w in wells) assigns[[w]] <- type
+    well_assignments(assigns)
+    showNotification(paste("Assigned", length(wells), "wells as", type), type = "message", duration = 3)
+    removeModal()
+  })
+
+  # Plate table output (grid of OD values)
+  output$plateTableOutput <- renderUI({
+    req(raw_data())
+    data <- raw_data()
+    well_col <- input$well_col
+    od_col   <- input$od_col
+    excluded <- excluded_wells()
+
+    if (is.null(well_col) || !well_col %in% colnames(data)) return(p(class="text-muted small", "No well column — plate table not available."))
+    if (is.null(od_col)   || !od_col   %in% colnames(data)) return(p(class="text-muted small", "No OD column — plate table not available."))
+
+    wells <- as.character(data[[well_col]])
+    if (mean(is_valid_well_id(wells), na.rm = TRUE) < 0.5) {
+      return(p(class="text-muted small", "Data does not contain plate well positions — table not available."))
+    }
+
+    ods   <- data[[od_col]]
+    well_od_map <- setNames(ods, wells)
+
+    # Determine plate dimensions from format selector or auto-detect
+    fmt <- input$plateFormat %||% "auto"
+    if (fmt == "96")  { plate_rows_n <- 8;  plate_cols_n <- 12 } else
+    if (fmt == "384") { plate_rows_n <- 16; plate_cols_n <- 24 } else
+    if (fmt == "48")  { plate_rows_n <- 6;  plate_cols_n <- 8  } else
+    if (fmt == "24")  { plate_rows_n <- 4;  plate_cols_n <- 6  } else {
+      vwells      <- wells[is_valid_well_id(wells)]
+      row_letters <- toupper(gsub("[0-9]+$", "", vwells))
+      col_nums    <- suppressWarnings(as.integer(gsub("^[A-Za-z]+", "", vwells)))
+      max_row_idx <- max(match(row_letters, LETTERS), na.rm = TRUE)
+      max_col     <- max(col_nums, na.rm = TRUE)
+      if (!is.finite(max_row_idx)) max_row_idx <- 8
+      if (!is.finite(max_col))     max_col     <- 12
+      fits_96  <- max_row_idx <= 8  && max_col <= 12
+      fits_384 <- max_row_idx <= 16 && max_col <= 24
+      fits_48  <- max_row_idx <= 6  && max_col <= 8
+      fits_24  <- max_row_idx <= 4  && max_col <= 6
+      if (fits_24)  { plate_rows_n <- 4;  plate_cols_n <- 6  } else
+      if (fits_48)  { plate_rows_n <- 6;  plate_cols_n <- 8  } else
+      if (fits_96)  { plate_rows_n <- 8;  plate_cols_n <- 12 } else
+      if (fits_384) { plate_rows_n <- 16; plate_cols_n <- 24 } else {
+        plate_rows_n <- max_row_idx; plate_cols_n <- max_col
+      }
+    }
+    row_lbl <- LETTERS[1:plate_rows_n]
+
+    header <- tags$tr(tags$th(""), lapply(1:plate_cols_n, function(c)
+      tags$th(as.character(c), style="text-align:center;font-size:10px;min-width:50px;")))
+    body_rows <- lapply(row_lbl, function(r) {
+      cells <- lapply(1:plate_cols_n, function(c) {
+        wid <- paste0(r, c)
+        val <- well_od_map[wid]
+        is_ex <- wid %in% excluded
+        style <- if (is_ex) "background:#f3f4f6;color:#9ca3af;text-decoration:line-through;" else ""
+        tags$td(
+          style = paste0("text-align:center;font-size:11px;padding:2px 4px;border:1px solid #e5e7eb;", style),
+          if (!is.null(val) && !is.na(val)) sprintf("%.3f", as.numeric(val)) else ""
+        )
+      })
+      tags$tr(tags$th(r, style="font-weight:bold;padding:2px 6px;font-size:11px;"), cells)
+    })
+
+    tags$div(style="overflow-x:auto;",
+      tags$table(style="border-collapse:collapse;font-family:monospace;",
+        tags$thead(header), tags$tbody(body_rows))
+    )
+  })
+
+  # Exclude/Restore all wells observers
+  observeEvent(input$resetExclusions, {
+    excluded_wells(character(0))
+    showNotification("All exclusions cleared.", type="message", duration=3)
+  })
+  observeEvent(input$restoreAllWells, {
+    excluded_wells(character(0))
+    showNotification("All exclusions cleared.", type="message", duration=3)
+  })
+  observeEvent(input$excludeSelectedWells, {
+    showNotification("Click individual wells in the plate view to exclude them.", type="message", duration=4)
   })
 
   # Plate summary table
@@ -629,6 +978,141 @@ server <- function(input, output, session) {
     return(results())
   })
   
+  # Dynamic plot height wrapper
+  output$standardCurvePlotWrapper <- renderUI({
+    height_px <- paste0(input$plotHeight %||% 600, "px")
+    plotlyOutput("standardCurvePlot", height = height_px)
+  })
+
+  # ---- Helper: get unique sample type labels from current results ----
+  get_sample_types <- function(res) {
+    CTRL <- c("Standard", "NSB", "B0", "Blank", "QC_Low", "QC_Mid", "QC_High")
+    if (is.null(res)) return(character(0))
+    s <- res$samples
+    if (is.null(s) || !("Type" %in% colnames(s))) return(character(0))
+    unique(s$Type[!s$Type %in% CTRL & !is.na(s$Type)])
+  }
+
+  # ---- Block "Color by sample" when labels aren't unique: show modal + uncheck ----
+  observeEvent(input$colorSamplesIndividually, {
+    if (!isTRUE(input$colorSamplesIndividually)) return()
+    res <- filtered_results()
+    sample_types <- get_sample_types(res)
+    if (length(sample_types) > 1) return()   # labels ARE unique — nothing to do
+
+    updateCheckboxInput(session, "colorSamplesIndividually", value = FALSE)
+
+    showModal(modalDialog(
+      title = tagList(icon("triangle-exclamation"), " Sample labels required"),
+      p("To color by sample, each sample group needs a unique name.",
+        "Right now all samples share the same label."),
+      p("Assign unique names first using one of:"),
+      tags$ul(
+        tags$li(tags$b("Auto-label:"), " go to Plate View and click Auto-label replicates"),
+        tags$li(tags$b("Manual:"), " go to Plate View and click individual wells to assign names")
+      ),
+      p(class = "text-muted small",
+        "After assigning names, hit Analyze again, then enable Color by sample."),
+      footer = modalButton("Got it")
+    ))
+  })
+
+  # ---- Auto-label button (shown in Plate View when sample labels aren't unique) ----
+  output$autoLabelBtn <- renderUI({
+    res <- filtered_results()
+    sample_types <- get_sample_types(res)
+    if (length(sample_types) > 1) return(NULL)   # already labeled — hide
+    tags$div(style = "margin-top:4px;",
+      actionButton("showAutoLabelModal", "Auto-label replicates",
+                   icon = icon("wand-magic-sparkles"), class = "btn btn-info btn-sm"))
+  })
+
+  # ---- Auto-label modal ----
+  observeEvent(input$showAutoLabelModal, {
+    showModal(modalDialog(
+      title = tagList(icon("wand-magic-sparkles"), " Auto-label replicates"),
+      p("Groups adjacent sample wells and assigns sequential names."),
+      fluidRow(
+        column(6,
+          radioButtons("autoLabel_direction", "Replicates run along:",
+            choices = c("Rows (A1-A2-A3 …)" = "row",
+                        "Columns (A1-B1-C1 …)" = "col"),
+            selected = "row")
+        ),
+        column(6,
+          numericInput("autoLabel_repCount", "Wells per sample (replicates):",
+                       value = 2, min = 1, max = 12, step = 1)
+        )
+      ),
+      textInput("autoLabel_prefix", "Sample name prefix:", value = "Sample_"),
+      p(class = "text-muted small",
+        "Example: prefix Sample_ with 2 replicates →",
+        tags$em("Sample_1, Sample_1, Sample_2, Sample_2, …")),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("applyAutoLabel", "Apply labels", class = "btn btn-primary")
+      )
+    ))
+  })
+
+  # ---- Apply auto-label ----
+  observeEvent(input$applyAutoLabel, {
+    removeModal()
+    res <- filtered_results()
+    if (is.null(res)) return()
+
+    CTRL <- c("Standard", "NSB", "B0", "Blank", "QC_Low", "QC_Mid", "QC_High")
+    samples <- res$samples
+    if (is.null(samples) || !("Well" %in% colnames(samples))) {
+      showNotification("No sample wells found in results.", type = "warning")
+      return()
+    }
+
+    # Get sample wells
+    sample_wells <- samples$Well[!samples$Type %in% CTRL & !is.na(samples$Well)]
+    sample_wells <- unique(sample_wells)
+
+    if (length(sample_wells) == 0) {
+      showNotification("No sample wells found.", type = "warning")
+      return()
+    }
+
+    # Parse well IDs into row letter + col number for sorting
+    rows <- toupper(gsub("[0-9]+$", "", sample_wells))
+    cols <- suppressWarnings(as.integer(gsub("^[A-Za-z]+", "", sample_wells)))
+    row_idx <- match(rows, LETTERS)
+
+    # Sort: row-wise = by row first, then col; col-wise = col first, then row
+    direction <- input$autoLabel_direction %||% "row"
+    if (direction == "row") {
+      ord <- order(row_idx, cols)
+    } else {
+      ord <- order(cols, row_idx)
+    }
+    sorted_wells <- sample_wells[ord]
+
+    # Group into replicates
+    n_rep <- max(1L, as.integer(input$autoLabel_repCount %||% 2))
+    prefix <- input$autoLabel_prefix %||% "Sample_"
+    n_groups <- ceiling(length(sorted_wells) / n_rep)
+
+    assigns <- well_assignments()
+    for (i in seq_along(sorted_wells)) {
+      group_num <- ceiling(i / n_rep)
+      assigns[[sorted_wells[i]]] <- paste0(prefix, group_num)
+    }
+    well_assignments(assigns)
+
+    showNotification(
+      paste0("Labeled ", length(sorted_wells), " wells as ", n_groups,
+             " samples (", n_rep, " replicates each). Click Analyze to update."),
+      type = "message", duration = 6
+    )
+  })
+
+  # sampleLabelWarning now unused (replaced by modal above) — keep as NULL
+  output$sampleLabelWarning <- renderUI(NULL)
+
   # Standard curve plot output
   output$standardCurvePlot <- renderPlotly({
     req(filtered_results())
@@ -643,8 +1127,22 @@ server <- function(input, output, session) {
     create_standard_curve_plot(
       filtered_results(),
       selected_model,
-      show_reliability_colors = input$showReliabilityColors %||% TRUE,
-      flip_axes = input$flipAxes %||% FALSE
+      show_reliability_colors    = input$showReliabilityColors    %||% TRUE,
+      flip_axes                  = input$flipAxes                  %||% FALSE,
+      point_size                 = input$plotPointSize             %||% 3,
+      line_size                  = input$plotLineSize              %||% 1.2,
+      theme_name                 = input$plotTheme                 %||% "cowplot",
+      font_family                = input$plotFont                  %||% "Arial",
+      std_color                  = input$std_color                 %||% "#dc2626",
+      sample_color               = input$sample_color              %||% "#2563eb",
+      unreliable_color           = input$unreliable_color          %||% "#eab308",
+      show_r2                    = input$showR2                    %||% TRUE,
+      show_x_errbar              = input$showXErrbar               %||% FALSE,
+      show_ci                    = input$showCI                    %||% FALSE,
+      plot_title                 = input$plotTitle,
+      x_title                    = input$plotXLabel,
+      y_title                    = input$plotYLabel,
+      color_samples_individually = input$colorSamplesIndividually  %||% FALSE
     )
   })
   
@@ -683,7 +1181,9 @@ server <- function(input, output, session) {
           c(TRUE, FALSE),
           c("#FFDDDD", "white")
         )
-      )
+      ) %>%
+      formatStyle("Out_of_Range",
+        backgroundColor = styleEqual(TRUE, "#fef9c3"))
   })
 
   output$sampleSummaryTable <- renderDT({
@@ -829,7 +1329,7 @@ server <- function(input, output, session) {
         Mean_Back_Calc, Mean_Recovery_Pct, Mean_Percent_RE, QC_Status
       )
 
-    datatable(
+    dt <- datatable(
       display_data,
       options = list(pageLength = 20, scrollX = TRUE, dom = 'tp'),
       rownames = FALSE
@@ -842,6 +1342,19 @@ server <- function(input, output, session) {
         "Mean_Recovery_Pct",
         backgroundColor = styleInterval(c(80, 120), c("#f8d7da", "#d4edda", "#f8d7da"))
       )
+    # Highlight CV > 15%
+    if ("CV_Pct" %in% colnames(display_data)) {
+      dt <- dt %>%
+        formatStyle("CV_Pct",
+          backgroundColor = styleInterval(15, c("white", "#fef9c3")))
+    }
+    # Highlight %RE outside ±20%
+    if ("Mean_Percent_RE" %in% colnames(display_data)) {
+      dt <- dt %>%
+        formatStyle("Mean_Percent_RE",
+          backgroundColor = styleInterval(c(-20, 20), c("#fee2e2", "white", "#fee2e2")))
+    }
+    dt
   })
 
   # Data summary banner after upload
@@ -932,6 +1445,8 @@ server <- function(input, output, session) {
   observeEvent(input$resetAnalysis, {
     results(NULL)
     raw_data(NULL)
+    parsed_plate(NULL)
+    well_assignments(list())
     # Reset file input via JS (shinyjs not available)
     session$sendCustomMessage("resetFileInput", "file")
     updateSelectInput(session, "sheet", choices = character(0))
@@ -1056,187 +1571,33 @@ server <- function(input, output, session) {
   )
 
   # Helper function to create ggplot version for export
-  create_export_plot <- function(results, model_choice, flip_axes = FALSE) {
-    # Extract needed data elements
-    std_summary <- results$std_summary
-    samples_data <- results$samples
-    log_transform <- results$log_transform
-    std_range <- results$std_range
-    y_axis_label <- if(results$skip_normalization) "OD (corrected)" else "Normalized OD (B/B0)"
-    best_model <- results$best_model_name
-
-    # Generate curve data
-    min_conc <- min(std_summary$Concentration[std_summary$Concentration > 0], na.rm = TRUE) / 10
-    max_conc <- max(std_summary$Concentration, na.rm = TRUE) * 10
-    x_points <- exp(seq(log(min_conc), log(max_conc), length.out = 100))
-
-    # Prepare standard points and curve data as x/y columns
-    std_pts <- data.frame(
-      x = std_summary$Concentration,
-      y = std_summary$Mean_Response,
-      y_lo = std_summary$Mean_Response - std_summary$SD_Response,
-      y_hi = std_summary$Mean_Response + std_summary$SD_Response
+  create_export_plot <- function(results, model_choice, flip_axes = FALSE,
+                               theme_name = "cowplot", font_family = "Arial",
+                               std_color = "#dc2626", sample_color = "#2563eb",
+                               unreliable_color = "#eab308", show_r2 = TRUE,
+                               show_x_errbar = FALSE, show_ci = FALSE,
+                               plot_title = NULL, x_title = NULL, y_title = NULL,
+                               point_size = 3, line_size = 1.2,
+                               color_samples_individually = FALSE) {
+    create_standard_curve_plot(
+      results, model_choice,
+      flip_axes                  = flip_axes,
+      point_size                 = point_size,
+      line_size                  = line_size,
+      theme_name                 = theme_name,
+      font_family                = font_family,
+      std_color                  = std_color,
+      sample_color               = sample_color,
+      unreliable_color           = unreliable_color,
+      show_r2                    = show_r2,
+      show_x_errbar              = show_x_errbar,
+      show_ci                    = show_ci,
+      plot_title                 = plot_title,
+      x_title                    = x_title,
+      y_title                    = y_title,
+      color_samples_individually = color_samples_individually,
+      return_ggplot              = TRUE
     )
-
-    # Build curve data frames
-    curve_frames <- list()
-    if (model_choice == "combined" || model_choice == "4pl") {
-      if (!is.null(results$models[["4PL"]]) && results$models[["4PL"]]$is_valid()) {
-        y_4pl <- tryCatch(results$models[["4PL"]]$predict_response(x_points), error = function(e) NULL)
-        if (!is.null(y_4pl)) curve_frames$f4pl <- data.frame(x = x_points, y = y_4pl, model = "4PL")
-      }
-    }
-    if (model_choice == "combined" || model_choice == "5pl") {
-      if (!is.null(results$models[["5PL"]]) && results$models[["5PL"]]$is_valid()) {
-        y_5pl <- tryCatch(results$models[["5PL"]]$predict_response(x_points), error = function(e) NULL)
-        if (!is.null(y_5pl)) curve_frames$f5pl <- data.frame(x = x_points, y = y_5pl, model = "5PL")
-      }
-    }
-    if (model_choice == "combined" || model_choice == "linear") {
-      if (!is.null(results$models[["Linear"]]) && results$models[["Linear"]]$is_valid()) {
-        y_lin <- tryCatch(results$models[["Linear"]]$predict_response(x_points), error = function(e) NULL)
-        if (!is.null(y_lin)) curve_frames$flin <- data.frame(x = x_points, y = y_lin, model = "Linear")
-      }
-    }
-
-    # Process sample data for plotting
-    min_conc_plot <- min(std_summary$Concentration[std_summary$Concentration > 0], na.rm = TRUE)
-    samples_summary <- samples_data %>%
-      dplyr::filter(!is.na(Response)) %>%
-      dplyr::group_by(Type) %>%
-      dplyr::summarize(
-        Mean_Response = mean(Response, na.rm = TRUE),
-        SD_Response = sd(Response, na.rm = TRUE),
-        Mean_Concentration = mean(Capped_Concentration, na.rm = TRUE),
-        SD_Concentration = sd(Capped_Concentration, na.rm = TRUE),
-        Has_Out_of_Range = any(Out_of_Range, na.rm = TRUE),
-        Has_Uncalculatable = any(Model_Used == "Uncalculatable", na.rm = TRUE),
-        Is_Unreliable = any(Is_Unreliable, na.rm = TRUE),
-        n = n(),
-        .groups = "drop"
-      ) %>%
-      dplyr::filter(!Type %in% c("NSB", "B0", "Standard", "Blank"))
-
-    if (nrow(samples_summary) > 0) {
-      samp_pts <- data.frame(
-        x = samples_summary$Mean_Concentration,
-        y = samples_summary$Mean_Response,
-        x_lo = pmax(samples_summary$Mean_Concentration - samples_summary$SD_Concentration, min_conc_plot / 10),
-        x_hi = samples_summary$Mean_Concentration + samples_summary$SD_Concentration,
-        y_lo = samples_summary$Mean_Response - samples_summary$SD_Response,
-        y_hi = samples_summary$Mean_Response + samples_summary$SD_Response,
-        Is_Unreliable = samples_summary$Is_Unreliable,
-        Type = samples_summary$Type
-      )
-    } else {
-      samp_pts <- NULL
-    }
-
-    # Flip axes if requested
-    if (flip_axes) {
-      std_pts <- data.frame(x = std_pts$y, y = std_pts$x, y_lo = NA_real_, y_hi = NA_real_)
-      for (nm in names(curve_frames)) {
-        cf <- curve_frames[[nm]]
-        curve_frames[[nm]] <- data.frame(x = cf$y, y = cf$x, model = cf$model)
-      }
-      if (!is.null(samp_pts)) {
-        samp_pts <- data.frame(
-          x = samp_pts$y, y = samp_pts$x,
-          x_lo = samp_pts$y_lo, x_hi = samp_pts$y_hi,
-          y_lo = samp_pts$x_lo, y_hi = samp_pts$x_hi,
-          Is_Unreliable = samp_pts$Is_Unreliable,
-          Type = samp_pts$Type
-        )
-      }
-    }
-
-    # Build warning captions
-    warning_messages <- character(0)
-    out_of_range_samples <- samples_data %>%
-      dplyr::filter(Out_of_Range == TRUE) %>%
-      dplyr::pull(Type) %>%
-      unique()
-    if (length(out_of_range_samples) > 0) {
-      warning_messages <- c(warning_messages,
-        paste("Note: Outside standard curve range:",
-              paste(out_of_range_samples, collapse = ", ")))
-    }
-    uncalculatable_samples <- samples_data %>%
-      dplyr::filter(Model_Used == "Uncalculatable") %>%
-      dplyr::pull(Type) %>%
-      unique()
-    if (length(uncalculatable_samples) > 0) {
-      warning_messages <- c(warning_messages,
-        paste("Warning: Estimated values:",
-              paste(uncalculatable_samples, collapse = ", ")))
-    }
-    caption <- if (length(warning_messages) > 0) paste(warning_messages, collapse = "\n") else NULL
-
-    # Build the plot
-    p <- ggplot() +
-      geom_point(data = std_pts, aes(x = x, y = y), color = "red", size = 3, shape = 16) +
-      geom_errorbar(data = std_pts, aes(x = x, ymin = y_lo, ymax = y_hi),
-                    width = 0.1, color = "red", alpha = 0.5)
-
-    # Add model curves
-    curve_colors <- c("4PL" = "blue", "5PL" = "purple", "Linear" = "green")
-    curve_linetypes <- c("4PL" = "solid", "5PL" = "dashed", "Linear" = "solid")
-    for (cf in curve_frames) {
-      p <- p + geom_line(data = cf, aes(x = x, y = y),
-                         color = curve_colors[cf$model[1]],
-                         linetype = curve_linetypes[cf$model[1]],
-                         linewidth = 1)
-    }
-
-    # Add sample points if any exist
-    if (!is.null(samp_pts) && nrow(samp_pts) > 0) {
-      p <- p +
-        geom_point(data = samp_pts,
-                   aes(x = x, y = y, color = Is_Unreliable, shape = Type), size = 3) +
-        scale_color_manual(values = c("TRUE" = "red", "FALSE" = "blue"),
-                           name = "Unreliable Value") +
-        geom_errorbarh(data = samp_pts,
-                       aes(y = y, xmin = x_lo, xmax = x_hi),
-                       height = 0.01, alpha = 0.5, color = "gray50") +
-        geom_errorbar(data = samp_pts,
-                      aes(x = x, ymin = y_lo, ymax = y_hi),
-                      width = 0.1, alpha = 0.5, color = "gray50")
-    }
-
-    # Add formatting — axis labels and log scale depend on flip_axes
-    if (flip_axes) {
-      p <- p +
-        scale_y_log10(labels = scales::label_number(), breaks = scales::breaks_log(n = 8)) +
-        geom_hline(yintercept = min(std_summary$Concentration, na.rm = TRUE),
-                   linetype = "dashed", alpha = 0.3) +
-        geom_hline(yintercept = max(std_summary$Concentration, na.rm = TRUE),
-                   linetype = "dashed", alpha = 0.3) +
-        labs(x = y_axis_label, y = "Concentration (log scale)",
-             title = paste0("ELISA Standard Curve - ", toupper(model_choice)),
-             subtitle = paste("Best model:", best_model), caption = caption)
-    } else {
-      p <- p +
-        scale_x_log10(labels = scales::label_number(), breaks = scales::breaks_log(n = 8)) +
-        geom_vline(xintercept = min(std_summary$Concentration, na.rm = TRUE),
-                   linetype = "dashed", alpha = 0.3) +
-        geom_vline(xintercept = max(std_summary$Concentration, na.rm = TRUE),
-                   linetype = "dashed", alpha = 0.3) +
-        labs(x = "Concentration (log scale)", y = y_axis_label,
-             title = paste0("ELISA Standard Curve - ", toupper(model_choice)),
-             subtitle = paste("Best model:", best_model), caption = caption)
-    }
-
-    p <- p +
-      theme_minimal() +
-      theme(
-        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
-        plot.subtitle = element_text(hjust = 0.5, size = 10),
-        axis.title = element_text(size = 12),
-        plot.caption = element_text(hjust = 0, color = "red", size = 10),
-        legend.position = "bottom"
-      )
-
-    return(p)
   }
 
   # Handlers for plot downloads (using ggplot2 for reliable PNG export)
@@ -1246,8 +1607,15 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       req(filtered_results())
-      p <- create_export_plot(filtered_results(), "combined", flip_axes = input$flipAxes %||% FALSE)
-      ggsave(file, plot = p, width = 12, height = 8, dpi = 150, bg = "white")
+      p <- create_export_plot(filtered_results(), "combined", flip_axes = input$flipAxes %||% FALSE,
+        theme_name = input$plotTheme %||% "cowplot", font_family = input$plotFont %||% "Arial",
+        std_color = input$std_color %||% "#dc2626", sample_color = input$sample_color %||% "#2563eb",
+        unreliable_color = input$unreliable_color %||% "#eab308",
+        show_r2 = input$showR2 %||% TRUE, show_x_errbar = input$showXErrbar %||% FALSE,
+        plot_title = input$plotTitle, x_title = input$plotXLabel, y_title = input$plotYLabel,
+        point_size = input$plotPointSize %||% 3, line_size = input$plotLineSize %||% 1.2,
+        color_samples_individually = input$colorSamplesIndividually %||% FALSE)
+      ggsave(file, plot = p, width = input$plotDlWidth %||% 8, height = input$plotDlHeight %||% 6, units = "in", dpi = 300, bg = "white")
     }
   )
 
@@ -1257,8 +1625,15 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       req(filtered_results())
-      p <- create_export_plot(filtered_results(), "4pl", flip_axes = input$flipAxes %||% FALSE)
-      ggsave(file, plot = p, width = 12, height = 8, dpi = 150, bg = "white")
+      p <- create_export_plot(filtered_results(), "4pl", flip_axes = input$flipAxes %||% FALSE,
+        theme_name = input$plotTheme %||% "cowplot", font_family = input$plotFont %||% "Arial",
+        std_color = input$std_color %||% "#dc2626", sample_color = input$sample_color %||% "#2563eb",
+        unreliable_color = input$unreliable_color %||% "#eab308",
+        show_r2 = input$showR2 %||% TRUE, show_x_errbar = input$showXErrbar %||% FALSE,
+        plot_title = input$plotTitle, x_title = input$plotXLabel, y_title = input$plotYLabel,
+        point_size = input$plotPointSize %||% 3, line_size = input$plotLineSize %||% 1.2,
+        color_samples_individually = input$colorSamplesIndividually %||% FALSE)
+      ggsave(file, plot = p, width = input$plotDlWidth %||% 8, height = input$plotDlHeight %||% 6, units = "in", dpi = 300, bg = "white")
     }
   )
 
@@ -1268,8 +1643,15 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       req(filtered_results())
-      p <- create_export_plot(filtered_results(), "5pl", flip_axes = input$flipAxes %||% FALSE)
-      ggsave(file, plot = p, width = 12, height = 8, dpi = 150, bg = "white")
+      p <- create_export_plot(filtered_results(), "5pl", flip_axes = input$flipAxes %||% FALSE,
+        theme_name = input$plotTheme %||% "cowplot", font_family = input$plotFont %||% "Arial",
+        std_color = input$std_color %||% "#dc2626", sample_color = input$sample_color %||% "#2563eb",
+        unreliable_color = input$unreliable_color %||% "#eab308",
+        show_r2 = input$showR2 %||% TRUE, show_x_errbar = input$showXErrbar %||% FALSE,
+        plot_title = input$plotTitle, x_title = input$plotXLabel, y_title = input$plotYLabel,
+        point_size = input$plotPointSize %||% 3, line_size = input$plotLineSize %||% 1.2,
+        color_samples_individually = input$colorSamplesIndividually %||% FALSE)
+      ggsave(file, plot = p, width = input$plotDlWidth %||% 8, height = input$plotDlHeight %||% 6, units = "in", dpi = 300, bg = "white")
     }
   )
 
@@ -1279,8 +1661,15 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       req(filtered_results())
-      p <- create_export_plot(filtered_results(), "linear", flip_axes = input$flipAxes %||% FALSE)
-      ggsave(file, plot = p, width = 12, height = 8, dpi = 150, bg = "white")
+      p <- create_export_plot(filtered_results(), "linear", flip_axes = input$flipAxes %||% FALSE,
+        theme_name = input$plotTheme %||% "cowplot", font_family = input$plotFont %||% "Arial",
+        std_color = input$std_color %||% "#dc2626", sample_color = input$sample_color %||% "#2563eb",
+        unreliable_color = input$unreliable_color %||% "#eab308",
+        show_r2 = input$showR2 %||% TRUE, show_x_errbar = input$showXErrbar %||% FALSE,
+        plot_title = input$plotTitle, x_title = input$plotXLabel, y_title = input$plotYLabel,
+        point_size = input$plotPointSize %||% 3, line_size = input$plotLineSize %||% 1.2,
+        color_samples_individually = input$colorSamplesIndividually %||% FALSE)
+      ggsave(file, plot = p, width = input$plotDlWidth %||% 8, height = input$plotDlHeight %||% 6, units = "in", dpi = 300, bg = "white")
     }
   )
 
@@ -1359,16 +1748,16 @@ server <- function(input, output, session) {
       tryCatch({
         flip <- input$flipAxes %||% FALSE
         p_combined <- create_export_plot(filtered_results(), "combined", flip_axes = flip)
-        ggsave(combined_plot, plot = p_combined, width = 12, height = 8, dpi = 150, bg = "white")
+        ggsave(combined_plot, plot = p_combined, width = input$plotDlWidth %||% 8, height = input$plotDlHeight %||% 6, units = "in", dpi = 300, bg = "white")
 
         p_4pl <- create_export_plot(filtered_results(), "4pl", flip_axes = flip)
-        ggsave(fourpl_plot, plot = p_4pl, width = 12, height = 8, dpi = 150, bg = "white")
+        ggsave(fourpl_plot, plot = p_4pl, width = input$plotDlWidth %||% 8, height = input$plotDlHeight %||% 6, units = "in", dpi = 300, bg = "white")
 
         p_5pl <- create_export_plot(filtered_results(), "5pl", flip_axes = flip)
-        ggsave(fivepl_plot, plot = p_5pl, width = 12, height = 8, dpi = 150, bg = "white")
+        ggsave(fivepl_plot, plot = p_5pl, width = input$plotDlWidth %||% 8, height = input$plotDlHeight %||% 6, units = "in", dpi = 300, bg = "white")
 
         p_linear <- create_export_plot(filtered_results(), "linear", flip_axes = flip)
-        ggsave(linear_plot, plot = p_linear, width = 12, height = 8, dpi = 150, bg = "white")
+        ggsave(linear_plot, plot = p_linear, width = input$plotDlWidth %||% 8, height = input$plotDlHeight %||% 6, units = "in", dpi = 300, bg = "white")
       }, error = function(e) {
         message("Error generating plot: ", e$message)
       })
@@ -1381,6 +1770,249 @@ server <- function(input, output, session) {
     },
     contentType = "application/zip"
   )
+
+  # ============ Paste Data Observers ============
+
+  observeEvent(input$process_paste, {
+    req(input$paste_data_text)
+    text <- input$paste_data_text
+    if (trimws(text) == "") {
+      showNotification("Nothing to parse — paste your data first.", type = "warning")
+      return()
+    }
+
+    result <- tryCatch(parse_pasted_data(text), error = function(e) {
+      list(format = "error", message = e$message)
+    })
+
+    if (result$format == "error") {
+      showNotification(paste("Parse error:", result$message), type = "error", duration = 8)
+      return()
+    }
+
+    raw_data(result$data)
+    if (result$format == "plate") {
+      parsed_plate(list(plate_corrected = result$plate_matrix))
+    }
+
+    # Update column dropdowns to match new data
+    update_column_dropdowns(session, colnames(result$data))
+
+    # Clear old well assignments
+    well_assignments(list())
+
+    showNotification(result$message, type = "message", duration = 5)
+    updateNavbarPage(session, "mainNav", selected = "Plate View")
+  })
+
+  observeEvent(input$clear_paste, {
+    updateTextAreaInput(session, "paste_data_text", value = "")
+  })
+
+  output$pasteParseStatus <- renderUI({
+    if (is.null(raw_data())) return(NULL)
+    tags$div(class = "alert alert-success", style = "margin-top:8px;",
+      icon("check"), " Data loaded: ", nrow(raw_data()), " rows")
+  })
+
+  # ============ Well Click / Assignment Modal ============
+
+  observeEvent(input$clicked_well, {
+    req(input$clicked_well)
+    well_id <- input$clicked_well
+    assigns <- well_assignments()
+
+    # Determine current type from data or manual assignment
+    data <- raw_data()
+    well_col_name <- input$well_col
+    type_col_name <- input$type_col
+    current_type <- assigns[[well_id]] %||% {
+      if (!is.null(data) && !is.null(well_col_name) && well_col_name %in% colnames(data) &&
+          !is.null(type_col_name) && type_col_name %in% colnames(data)) {
+        row_idx <- which(as.character(data[[well_col_name]]) == well_id)
+        if (length(row_idx) > 0) as.character(data[[type_col_name]][row_idx[1]]) else ""
+      } else ""
+    }
+
+    # Get OD value for display
+    od_col_name <- input$od_col
+    od_val <- tryCatch({
+      if (!is.null(data) && !is.null(od_col_name) && !is.null(well_col_name) &&
+          od_col_name %in% colnames(data) && well_col_name %in% colnames(data)) {
+        row_idx <- which(as.character(data[[well_col_name]]) == well_id)
+        if (length(row_idx) > 0) data[[od_col_name]][row_idx[1]] else NA
+      } else if (!is.null(parsed_plate())) {
+        r_idx <- which(LETTERS[1:8] == substr(well_id, 1, 1))
+        c_idx <- suppressWarnings(as.integer(substr(well_id, 2, nchar(well_id))))
+        if (length(r_idx) > 0 && !is.na(c_idx) && c_idx >= 1 && c_idx <= 12)
+          parsed_plate()$plate_corrected[r_idx, c_idx] else NA
+      } else NA
+    }, error = function(e) NA)
+
+    od_display <- if (!is.null(od_val) && !is.na(od_val %||% NA)) sprintf("%.4f", as.numeric(od_val)) else "—"
+
+    showModal(modalDialog(
+      title = paste("Well", well_id),
+      p(tags$b("OD value: "), od_display),
+      selectizeInput("modal_well_type", "Assign Sample Type:",
+                  choices = c("Standard", "Sample", "Blank", "NSB", "B0",
+                              "QC_Low", "QC_Mid", "QC_High", "Empty"),
+                  selected = if (!is.null(current_type) && current_type != "") current_type else "Sample",
+                  options = list(create = TRUE, placeholder = "Type a custom name or choose...")),
+      tags$small(class = "text-muted", "Tip: type a custom sample name (e.g. ", tags$em("Patient_01"), ") and press Enter to create it."),
+      conditionalPanel(
+        condition = "input.modal_well_type == 'Standard'",
+        textInput("modal_well_conc", "Concentration:", placeholder = "e.g. 62.5")
+      ),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("modal_clear_well", "Clear Assignment", class = "btn btn-default"),
+        actionButton("modal_exclude_well",
+                     if (well_id %in% excluded_wells()) "Restore" else "Exclude",
+                     class = if (well_id %in% excluded_wells()) "btn btn-success" else "btn btn-warning"),
+        actionButton("modal_assign_well", "Assign", class = "btn btn-primary")
+      )
+    ))
+  })
+
+  observeEvent(input$modal_assign_well, {
+    req(input$clicked_well, input$modal_well_type)
+    well_id <- input$clicked_well
+    assigns <- well_assignments()
+    assigns[[well_id]] <- input$modal_well_type
+    if (!is.null(input$modal_well_conc) && nchar(trimws(input$modal_well_conc %||% "")) > 0) {
+      assigns[[paste0(well_id, "_conc")]] <- trimws(input$modal_well_conc)
+    }
+    well_assignments(assigns)
+    removeModal()
+    showNotification(paste0(well_id, " assigned as ", input$modal_well_type), type = "message", duration = 2)
+  })
+
+  observeEvent(input$modal_exclude_well, {
+    req(input$clicked_well)
+    well_id <- input$clicked_well
+    ex <- excluded_wells()
+    if (well_id %in% ex) {
+      excluded_wells(setdiff(ex, well_id))
+      showNotification(paste(well_id, "restored."), type = "message", duration = 2)
+    } else {
+      excluded_wells(c(ex, well_id))
+      showNotification(paste(well_id, "excluded."), type = "message", duration = 2)
+    }
+    removeModal()
+  })
+
+  observeEvent(input$modal_clear_well, {
+    req(input$clicked_well)
+    assigns <- well_assignments()
+    assigns[[input$clicked_well]] <- NULL
+    assigns[[paste0(input$clicked_well, "_conc")]] <- NULL
+    well_assignments(assigns)
+    removeModal()
+  })
+
+  # ============ Format Conversion & Copy Plate ============
+
+  # Observe raw_data changes to update the hidden clipboard textarea
+  observe({
+    if (is.null(raw_data())) return(NULL)
+    data <- raw_data()
+    well_col <- input$well_col
+    type_col <- input$type_col
+    od_col   <- input$od_col
+    assigns  <- well_assignments()
+
+    plate_mat <- matrix("", 8, 12)
+    if (!is.null(well_col) && well_col %in% colnames(data)) {
+      wells <- as.character(data[[well_col]])
+      types <- if (!is.null(type_col) && type_col %in% colnames(data)) as.character(data[[type_col]]) else rep("", length(wells))
+      ods   <- if (!is.null(od_col)   && od_col   %in% colnames(data)) as.character(data[[od_col]])   else rep("", length(wells))
+      for (i in seq_along(wells)) {
+        w     <- wells[i]
+        r_idx <- which(LETTERS[1:8] == substr(w, 1, 1))
+        c_idx <- suppressWarnings(as.integer(substr(w, 2, nchar(w))))
+        if (length(r_idx) > 0 && !is.na(c_idx) && c_idx >= 1 && c_idx <= 12) {
+          type_display <- if (!is.null(assigns[[w]])) assigns[[w]] else types[i]
+          od_display   <- ods[i]
+          plate_mat[r_idx, c_idx] <- if (!is.na(od_display) && od_display != "") od_display else type_display
+        }
+      }
+    } else if (!is.null(parsed_plate())) {
+      pm <- parsed_plate()$plate_corrected
+      for (r in 1:8) for (c in 1:12) {
+        v <- pm[r, c]
+        plate_mat[r, c] <- if (!is.na(v %||% NA)) as.character(v) else ""
+      }
+    }
+
+    header_row <- paste(c("", as.character(1:12)), collapse = "\t")
+    data_rows  <- sapply(1:8, function(r) paste(c(LETTERS[r], plate_mat[r, ]), collapse = "\t"))
+    tsv_text   <- paste(c(header_row, data_rows), collapse = "\n")
+    session$sendCustomMessage("updatePlateText", tsv_text)
+  })
+
+  output$plateLongTableOutput <- renderUI({
+    req(raw_data())
+    tagList(
+      hr(),
+      h5("Long Format Table"),
+      DT::dataTableOutput("plateLongTable")
+    )
+  })
+
+  output$plateLongTable <- DT::renderDataTable({
+    req(raw_data())
+    data <- raw_data()
+    # Apply well_assignments overrides to type column
+    assigns  <- well_assignments()
+    well_col <- input$well_col
+    type_col <- input$type_col
+    if (!is.null(well_col) && well_col %in% colnames(data) &&
+        !is.null(type_col) && type_col %in% colnames(data)) {
+      for (w in names(assigns)) {
+        if (!grepl("_conc$", w)) {
+          idx <- which(as.character(data[[well_col]]) == w)
+          if (length(idx) > 0) data[[type_col]][idx] <- assigns[[w]]
+        }
+      }
+    }
+    DT::datatable(data, options = list(pageLength = 20, scrollX = TRUE, dom = "tp"), rownames = FALSE)
+  })
+
+  output$download_long_format <- downloadHandler(
+    filename = function() paste0("ELISA_LongFormat_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".xlsx"),
+    content = function(file) {
+      req(raw_data())
+      writexl::write_xlsx(raw_data(), file)
+    }
+  )
+
+  output$download_plate_format <- downloadHandler(
+    filename = function() paste0("ELISA_PlateGrid_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".xlsx"),
+    content = function(file) {
+      req(raw_data())
+      data     <- raw_data()
+      well_col <- input$well_col %||% "Well ID"
+      od_col   <- input$od_col   %||% "OD"
+
+      plate_df <- data.frame(matrix("", 8, 13))
+      colnames(plate_df) <- c("Row", as.character(1:12))
+      plate_df$Row <- LETTERS[1:8]
+
+      if (well_col %in% colnames(data) && od_col %in% colnames(data)) {
+        for (i in seq_len(nrow(data))) {
+          w     <- as.character(data[[well_col]][i])
+          r_idx <- which(LETTERS[1:8] == substr(w, 1, 1))
+          c_idx <- suppressWarnings(as.integer(substr(w, 2, nchar(w))))
+          if (length(r_idx) > 0 && !is.na(c_idx) && c_idx >= 1 && c_idx <= 12) {
+            plate_df[r_idx, c_idx + 1] <- as.character(data[[od_col]][i])
+          }
+        }
+      }
+      writexl::write_xlsx(plate_df, file)
+    }
+  )
+
 }
 
 # Run the Shiny application

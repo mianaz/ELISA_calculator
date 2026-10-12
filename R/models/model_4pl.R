@@ -85,7 +85,13 @@ Elisa4PLModel <- R6Class("Elisa4PLModel",
 
         # Extract parameters
         self$extract_parameters()
-        self$is_fitted <- TRUE
+        # Verify params were extracted: if b is NA, drm returned a broken model
+        if (is.na(self$parameters$b)) {
+          self$fit_error <- "4PL fitting failed: model did not converge (check standard curve quality)"
+          self$is_fitted <- FALSE
+        } else {
+          self$is_fitted <- TRUE
+        }
 
       }, error = function(e) {
         self$fit_error <- e$message
@@ -106,6 +112,12 @@ Elisa4PLModel <- R6Class("Elisa4PLModel",
       tryCatch({
         params <- coef(self$fitted_model)
 
+        # Guard: coef() can return NULL when drc fails silently (errorm=FALSE)
+        if (is.null(params) || !is.numeric(params) || length(params) == 0) {
+          self$fit_warnings <- c(self$fit_warnings, "Model coefficients unavailable (convergence failure)")
+          return(invisible(NULL))
+        }
+
         # drc package naming: b:(Intercept), c:(Intercept), d:(Intercept), e:(Intercept)
         # For LL.4(): b=slope, c=lower, d=upper, e=ED50
         if ("b:(Intercept)" %in% names(params)) {
@@ -114,11 +126,12 @@ Elisa4PLModel <- R6Class("Elisa4PLModel",
           self$parameters$d <- unname(params["d:(Intercept)"])  # upper asymptote
           self$parameters$e <- unname(params["e:(Intercept)"])  # ED50
         } else {
-          # Generic fallback - assume order [b, c, d, e]
-          self$parameters$b <- unname(params[1])
-          self$parameters$c <- unname(params[2])
-          self$parameters$d <- unname(params[3])
-          self$parameters$e <- unname(params[4])
+          # Generic fallback: use NA instead of NULL to avoid deleting list keys
+          safe_param <- function(v, i) if (length(v) >= i && !is.null(v[[i]])) unname(v[i]) else NA
+          self$parameters$b <- safe_param(params, 1)
+          self$parameters$c <- safe_param(params, 2)
+          self$parameters$d <- safe_param(params, 3)
+          self$parameters$e <- safe_param(params, 4)
           self$fit_warnings <- c(self$fit_warnings, "Could not identify parameter names, used positional assignment")
         }
 
