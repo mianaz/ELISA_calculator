@@ -68,6 +68,8 @@ analyze_elisa <- function(
     calculate_limits = TRUE,
     normalize_per_plate = FALSE,
     id_col = NULL,
+    well_assignments = NULL,
+    excluded_wells = NULL,
     config = NULL
 ) {
 
@@ -139,6 +141,10 @@ analyze_elisa <- function(
     od_corr_col, use_corrected
   )
   message("  Columns mapped: Well, Type, OD, Concentration")
+
+  # Plate View edits: per-well type/concentration overrides and excluded wells.
+  # (Auto-label, click-to-assign and Exclude in Plate View must reach the analysis.)
+  data <- apply_well_overrides(data, well_assignments, excluded_wells)
 
   # STEP 3: Clean data
   message("\n[3/8] Cleaning data...")

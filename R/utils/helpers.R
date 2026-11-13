@@ -367,3 +367,45 @@ label_conc_units <- function(df, units) {
   colnames(df) <- nm
   df
 }
+
+
+#' Apply Plate View edits to the mapped data
+#'
+#' @param data Data frame with standardized column names (needs COL_WELL)
+#' @param assignments Named list/vector: well ID -> sample type; entries named
+#'   "<well>_conc" give a concentration for that well (standards)
+#' @param excluded Character vector of well IDs to drop from the analysis
+#' @return Data frame with overrides applied and excluded wells removed
+apply_well_overrides <- function(data, assignments = NULL, excluded = NULL) {
+  if (!COL_WELL %in% colnames(data)) return(data)
+  wells <- trimws(as.character(data[[COL_WELL]]))
+
+  if (length(assignments) > 0) {
+    if (!COL_TYPE %in% colnames(data)) data[[COL_TYPE]] <- NA_character_
+    data[[COL_TYPE]] <- as.character(data[[COL_TYPE]])
+    n_set <- 0L
+    for (nm in names(assignments)) {
+      if (grepl("_conc$", nm)) next
+      idx <- which(wells == nm)
+      if (length(idx) == 0) next
+      val <- as.character(assignments[[nm]])
+      data[[COL_TYPE]][idx] <- val
+      n_set <- n_set + length(idx)
+      conc <- assignments[[paste0(nm, "_conc")]]
+      if (!is.null(conc) && nzchar(trimws(as.character(conc)))) {
+        cv <- suppressWarnings(as.numeric(conc))
+        if (!is.na(cv)) data[[COL_CONCENTRATION]][idx] <- cv
+      }
+    }
+    if (n_set > 0) message("  Plate View: applied sample-type assignments to ", n_set, " wells")
+  }
+
+  if (length(excluded) > 0) {
+    drop <- wells %in% as.character(excluded)
+    if (any(drop)) {
+      message("  Plate View: excluded ", sum(drop), " wells (", paste(wells[drop], collapse = ", "), ")")
+      data <- data[!drop, , drop = FALSE]
+    }
+  }
+  data
+}

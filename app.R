@@ -489,7 +489,9 @@ server <- function(input, output, session) {
           models_to_fit = models,
           calculate_limits = input$calculate_limits %||% TRUE,
           normalize_per_plate = input$normalize_per_plate %||% FALSE,
-          id_col = input$id_col
+          id_col = input$id_col,
+          well_assignments = well_assignments(),
+          excluded_wells = excluded_wells()
         )
 
         incProgress(0.5, detail = "Generating outputs")
@@ -823,7 +825,7 @@ server <- function(input, output, session) {
       strong(length(unassigned), " well(s) have no sample type assigned"),
       " (", paste(head(unassigned, 6), collapse = ", "),
       if (length(unassigned) > 6) paste0("... +", length(unassigned) - 6, " more") else "",
-      "). Analysis continues using type column; assign types in plate view for visual clarity."
+      "). Click a well to assign a type, then press Analyze again to apply it."
     )
   })
 
