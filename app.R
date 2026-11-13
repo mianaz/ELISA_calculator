@@ -1158,6 +1158,12 @@ server <- function(input, output, session) {
     )
   })
   
+  # Units currently selected for concentration values (NULL = none)
+  units_now <- reactive({
+    resolve_conc_units(input$concUnits %||% "auto", filtered_results())
+  })
+  lu <- function(df) label_conc_units(df, units_now())
+
   # Table outputs
   output$standardsTable <- renderDT({
     req(filtered_results())
@@ -1167,7 +1173,8 @@ server <- function(input, output, session) {
     display_cols <- intersect(c(COL_WELL, COL_CONCENTRATION, COL_OD, COL_RESPONSE), available_cols)
     standards_data <- filtered_results()$standards %>%
       select(all_of(display_cols)) %>%
-      arrange(!!sym(COL_CONCENTRATION))
+      arrange(!!sym(COL_CONCENTRATION)) %>%
+      lu()
 
     # Create the table
     datatable(standards_data,
@@ -1180,7 +1187,7 @@ server <- function(input, output, session) {
     model <- input$modelSelect
 
     # Get samples data
-    samples_data <- filtered_results()$samples
+    samples_data <- lu(filtered_results()$samples)
 
     # Create the table with conditional formatting
     datatable(samples_data,
@@ -1202,7 +1209,7 @@ server <- function(input, output, session) {
     req(filtered_results())
 
     # Get sample summary data
-    sample_summary <- filtered_results()$sample_summary
+    sample_summary <- lu(filtered_results()$sample_summary)
 
     # Create the table
     datatable(sample_summary,
@@ -1226,6 +1233,7 @@ server <- function(input, output, session) {
       ))
     }
 
+    u_txt <- if (!is.null(units_now())) paste0(" ", units_now()) else ""
     data.frame(
       Metric = c(
         if (identical(limits$lod$details$blank_source, "zero-standard")) "LOD (0 standard)" else "LOD",
@@ -1233,11 +1241,11 @@ server <- function(input, output, session) {
       ),
       Value = c(
         if (!is.null(limits$lod$concentration) && !is.na(limits$lod$concentration))
-          format(limits$lod$concentration, digits = 4, scientific = TRUE) else "N/A",
+          paste0(format(limits$lod$concentration, digits = 4, scientific = TRUE), u_txt) else "N/A",
         if (!is.null(limits$loq$concentration) && !is.na(limits$loq$concentration))
-          format(limits$loq$concentration, digits = 4, scientific = TRUE) else "N/A",
+          paste0(format(limits$loq$concentration, digits = 4, scientific = TRUE), u_txt) else "N/A",
         if (!is.null(limits$uloq$concentration) && !is.na(limits$uloq$concentration))
-          format(limits$uloq$concentration, digits = 4, scientific = TRUE) else "N/A",
+          paste0(format(limits$uloq$concentration, digits = 4, scientific = TRUE), u_txt) else "N/A",
         if (!is.null(limits$dynamic_range) && !is.na(limits$dynamic_range$fold_range))
           paste0(round(limits$dynamic_range$fold_range, 1), "-fold") else "N/A"
       ),
@@ -1342,7 +1350,8 @@ server <- function(input, output, session) {
       select(
         Concentration, N, Mean_Response, CV_Pct,
         Mean_Back_Calc, Mean_Recovery_Pct, Mean_Percent_RE, QC_Status
-      )
+      ) %>%
+      lu()
 
     dt <- datatable(
       display_data,
@@ -1507,7 +1516,7 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       req(filtered_results())
-      writexl::write_xlsx(filtered_results()$sample_summary, file)
+      writexl::write_xlsx(lu(filtered_results()$sample_summary), file)
     }
   )
 
@@ -1517,7 +1526,7 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       req(filtered_results())
-      writexl::write_xlsx(filtered_results()$samples, file)
+      writexl::write_xlsx(lu(filtered_results()$samples), file)
     }
   )
 
@@ -1527,7 +1536,7 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       req(filtered_results())
-      writexl::write_xlsx(filtered_results()$standards, file)
+      writexl::write_xlsx(lu(filtered_results()$standards), file)
     }
   )
 
@@ -1541,13 +1550,13 @@ server <- function(input, output, session) {
       temp_dir <- tempdir()
       excel_file <- file.path(temp_dir, "ELISA_Results_AllData.xlsx")
       data_list <- list(
-        "Standards" = filtered_results()$standards,
-        "Samples" = filtered_results()$samples,
-        "Sample Summary" = filtered_results()$sample_summary,
+        "Standards" = lu(filtered_results()$standards),
+        "Samples" = lu(filtered_results()$samples),
+        "Sample Summary" = lu(filtered_results()$sample_summary),
         "Model Comparison" = filtered_results()$model_comparison
       )
       if (!is.null(filtered_results()$standards_accuracy)) {
-        data_list[["Standards Accuracy"]] <- filtered_results()$standards_accuracy
+        data_list[["Standards Accuracy"]] <- lu(filtered_results()$standards_accuracy)
       }
       writexl::write_xlsx(data_list, excel_file)
       zip(file, files = excel_file, flags = "-j")
@@ -1561,7 +1570,7 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       req(filtered_results())
-      writexl::write_xlsx(filtered_results()$sample_summary, file)
+      writexl::write_xlsx(lu(filtered_results()$sample_summary), file)
     }
   )
 
@@ -1571,7 +1580,7 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       req(filtered_results())
-      writexl::write_xlsx(filtered_results()$samples, file)
+      writexl::write_xlsx(lu(filtered_results()$samples), file)
     }
   )
 
@@ -1581,7 +1590,7 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       req(filtered_results())
-      writexl::write_xlsx(filtered_results()$standards, file)
+      writexl::write_xlsx(lu(filtered_results()$standards), file)
     }
   )
 
@@ -1711,15 +1720,15 @@ server <- function(input, output, session) {
 
       # Create Excel file with all data
       data_list <- list(
-        "Standards" = filtered_results()$standards,
-        "Samples" = filtered_results()$samples,
-        "Sample Summary" = filtered_results()$sample_summary,
+        "Standards" = lu(filtered_results()$standards),
+        "Samples" = lu(filtered_results()$samples),
+        "Sample Summary" = lu(filtered_results()$sample_summary),
         "Model Comparison" = filtered_results()$model_comparison
       )
 
       # Add accuracy data if available
       if (!is.null(filtered_results()$standards_accuracy)) {
-        data_list[["Standards Accuracy"]] <- filtered_results()$standards_accuracy
+        data_list[["Standards Accuracy"]] <- lu(filtered_results()$standards_accuracy)
       }
 
       writexl::write_xlsx(data_list, excel_file)
@@ -1731,14 +1740,14 @@ server <- function(input, output, session) {
         # Assay limits
         if (!is.null(filtered_results()$assay_limits)) {
           limits <- filtered_results()$assay_limits
-          qc_data[["Assay Limits"]] <- data.frame(
+          qc_data[["Assay Limits"]] <- lu(data.frame(
             Metric = c("LOD", "LOQ", "ULOQ"),
             Concentration = c(
               limits$lod$concentration %||% NA,
               limits$loq$concentration %||% NA,
               limits$uloq$concentration %||% NA
             )
-          )
+          ))
         }
 
         # QC Summary

@@ -337,3 +337,33 @@ detect_conc_units <- function(col_name) {
   u <- sub("^ug", "\u00b5g", u)
   trimws(u)
 }
+
+#' Resolve the concentration unit string from the UI choice
+#'
+#' @param conc_units "auto" (parse from column header), "none", or a unit string
+#' @param results Analysis results (uses results$conc_units_detected)
+#' @return Unit string, or NULL when no unit should be shown
+resolve_conc_units <- function(conc_units = "auto", results = NULL) {
+  if (is.null(conc_units) || identical(conc_units, "auto")) {
+    u <- if (!is.null(results)) results$conc_units_detected else NULL
+    return(if (is.null(u) || !nzchar(u)) NULL else u)
+  }
+  if (identical(conc_units, "none") || !nzchar(conc_units)) return(NULL)
+  conc_units
+}
+
+#' Append the unit to every concentration-valued column name of a table
+#'
+#' e.g. Mean_Concentration -> "Mean_Concentration (pg/mL)". Also covers
+#' Back_Calculated_Conc and the prediction CI bounds (CI_Lower / CI_Upper).
+#'
+#' @param df Data frame
+#' @param units Unit string or NULL (returns df unchanged)
+label_conc_units <- function(df, units) {
+  if (is.null(df) || !is.data.frame(df) || is.null(units) || !nzchar(units)) return(df)
+  nm <- colnames(df)
+  hit <- grepl("(Concentration|Conc|Back_Calc)$|^CI_(Lower|Upper)$", nm)
+  nm[hit] <- paste0(nm[hit], " (", units, ")")
+  colnames(df) <- nm
+  df
+}
