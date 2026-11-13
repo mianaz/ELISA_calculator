@@ -14,6 +14,7 @@ create_standard_curve_plot <- function(results, model_choice = "combined", show_
                                        show_r2 = TRUE, show_x_errbar = FALSE, show_ci = FALSE,
                                        plot_title = NULL, x_title = NULL, y_title = NULL,
                                        color_samples_individually = FALSE,
+                                       conc_units = "auto", show_std_labels = TRUE,
                                        return_ggplot = FALSE) {
   # Extract needed data elements
   std_summary <- results$std_summary
@@ -22,6 +23,26 @@ create_standard_curve_plot <- function(results, model_choice = "combined", show_
   std_range <- results$std_range
   y_axis_label <- if(results$skip_normalization) "OD (corrected)" else "Normalized OD (B/B0)"
   best_model <- results$best_model_name
+
+  # Concentration units: "auto" = parsed from the column header, "none" = omit
+  units_str <- if (is.null(conc_units) || identical(conc_units, "auto")) {
+    results$conc_units_detected
+  } else if (identical(conc_units, "none") || !nzchar(conc_units)) {
+    NULL
+  } else conc_units
+  units_txt <- if (!is.null(units_str)) paste0(" ", units_str) else ""
+  conc_axis_label <- if (!is.null(units_str)) paste0("Concentration (", units_str, ", log scale)") else "Concentration (log scale)"
+
+  # A 0 standard cannot sit on a log axis: draw it at a fixed position left of
+  # the lowest positive standard and label that tick "0".
+  pos_std <- std_summary$Concentration[std_summary$Concentration > 0]
+  has_zero <- any(std_summary$Concentration == 0, na.rm = TRUE) && length(pos_std) > 0
+  min_pos_std <- if (length(pos_std) > 0) min(pos_std, na.rm = TRUE) else NA_real_
+  zero_x <- if (has_zero) min_pos_std / 3 else NA_real_
+  # Standard letters A, B, C... in ascending concentration (0 standard = A)
+  std_order <- order(std_summary$Concentration)
+  std_letters <- rep(NA_character_, nrow(std_summary))
+  std_letters[std_order] <- if (nrow(std_summary) <= 26) LETTERS[seq_len(nrow(std_summary))] else as.character(seq_len(nrow(std_summary)))
   
   # Extract appropriate model
   model <- NULL
@@ -71,7 +92,7 @@ create_standard_curve_plot <- function(results, model_choice = "combined", show_
   }
   
   # Generate curve data points for x-axis
-  min_conc <- min(std_summary$Concentration[std_summary$Concentration > 0], na.rm = TRUE) / 10
+  min_conc <- if (has_zero) zero_x else min(std_summary$Concentration[std_summary$Concentration > 0], na.rm = TRUE) / 10
   max_conc <- max(std_summary$Concentration, na.rm = TRUE) * 10
   x_points <- exp(seq(log(min_conc), log(max_conc), length.out = 100))
   
@@ -186,21 +207,22 @@ create_standard_curve_plot <- function(results, model_choice = "combined", show_
   std_points <- std_summary %>%
     dplyr::mutate(
       Category = "Standards",
-      x = Concentration,
+      Std_Label = std_letters,
+      x = ifelse(Concentration == 0 & has_zero, zero_x, Concentration),
       y = Mean_Response,
       y_lo = Mean_Response - SD_Response,
       y_hi = Mean_Response + SD_Response,
       x_lo = NA_real_,
       x_hi = NA_real_,
       hover_text = paste0(
-        "Standard\n",
-        "Conc: ", signif(Concentration, 4), "\n",
+        "Standard ", std_letters, "\n",
+        "Conc: ", signif(Concentration, 4), units_txt, "\n",
         "Response: ", round(Mean_Response, 4), "\n",
         "SD: ", round(SD_Response, 4), "\n",
         "N: ", n
       )
     ) %>%
-    dplyr::select(Category, x, y, y_lo, y_hi, x_lo, x_hi, hover_text)
+    dplyr::select(Category, Std_Label, x, y, y_lo, y_hi, x_lo, x_hi, hover_text)
 
   # Sample hover text & categories
   sample_points <- NULL
@@ -209,7 +231,7 @@ create_standard_curve_plot <- function(results, model_choice = "combined", show_
       dplyr::mutate(
         hover_text = paste0(
           Type, "\n",
-          "Conc: ", signif(Mean_Concentration, 4), "\n",
+          "Conc: ", signif(Mean_Concentration, 4), units_txt, "\n",
           "Response: ", round(Mean_Response, 4), "\n",
           "N: ", n,
           ifelse(Is_Unreliable, "\n(Unreliable)", ""),
@@ -382,25 +404,47 @@ create_standard_curve_plot <- function(results, model_choice = "combined", show_
     paste0(model_name, " parameters")
   }
 
+  # Log axis helpers: positive breaks plus a "0" tick for the 0 standard
+  log_breaks_fn <- function(lims) {
+    b <- scales::breaks_log(n = 8)(lims)
+    if (has_zero) {
+      b <- b[b > zero_x * 1.5]
+      b <- sort(c(zero_x, b))
+    }
+    b
+  }
+  log_labels_fn <- function(b) {
+    lab <- scales::label_number()(b)
+    if (has_zero) lab[abs(b - zero_x) <= 1e-9 * zero_x] <- "0"
+    lab
+  }
+  ref_lo <- if (has_zero) min_pos_std else min(std_summary$Concentration, na.rm = TRUE)
+  ref_hi <- max(std_summary$Concentration, na.rm = TRUE)
+
   # Axis labels and log scale depend on flip_axes
   if (flip_axes) {
     x_label <- y_axis_label
-    y_label <- "Concentration (log scale)"
+    y_label <- conc_axis_label
     p <- p +
-      scale_y_log10(labels = scales::label_number(), breaks = scales::breaks_log(n = 8)) +
-      geom_hline(yintercept = min(std_summary$Concentration, na.rm = TRUE),
-                 linetype = "dashed", alpha = 0.3) +
-      geom_hline(yintercept = max(std_summary$Concentration, na.rm = TRUE),
-                 linetype = "dashed", alpha = 0.3)
+      scale_y_log10(labels = log_labels_fn, breaks = log_breaks_fn) +
+      geom_hline(yintercept = ref_lo, linetype = "dashed", alpha = 0.3) +
+      geom_hline(yintercept = ref_hi, linetype = "dashed", alpha = 0.3)
   } else {
-    x_label <- "Concentration (log scale)"
+    x_label <- conc_axis_label
     y_label <- y_axis_label
     p <- p +
-      scale_x_log10(labels = scales::label_number(), breaks = scales::breaks_log(n = 8)) +
-      geom_vline(xintercept = min(std_summary$Concentration, na.rm = TRUE),
-                 linetype = "dashed", alpha = 0.3) +
-      geom_vline(xintercept = max(std_summary$Concentration, na.rm = TRUE),
-                 linetype = "dashed", alpha = 0.3)
+      scale_x_log10(labels = log_labels_fn, breaks = log_breaks_fn) +
+      geom_vline(xintercept = ref_lo, linetype = "dashed", alpha = 0.3) +
+      geom_vline(xintercept = ref_hi, linetype = "dashed", alpha = 0.3)
+  }
+
+  # Standard letters (A, B, C...) next to each standard point
+  if (isTRUE(show_std_labels) && nrow(std_points) > 0) {
+    p <- p + geom_text(data = std_points,
+                       aes(x = x, y = y, label = Std_Label),
+                       color = std_color, size = 3.6, fontface = "bold",
+                       vjust = -1.2, hjust = if (flip_axes) -0.6 else 0.5,
+                       family = font_family, inherit.aes = FALSE)
   }
 
   # Apply custom titles/labels

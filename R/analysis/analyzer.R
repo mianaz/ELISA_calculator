@@ -67,6 +67,7 @@ analyze_elisa <- function(
     models_to_fit = c(MODEL_4PL, MODEL_5PL, MODEL_LINEAR),
     calculate_limits = TRUE,
     normalize_per_plate = FALSE,
+    id_col = NULL,
     config = NULL
 ) {
 
@@ -115,6 +116,23 @@ analyze_elisa <- function(
   conc_col <- conc_col %||% detected_cols$concentration
   od_col <- od_col %||% detected_cols$od
 
+  # Optional Sample ID column: sample wells are named by subject/sample ID
+  # instead of whatever is in the Sample Type column (e.g. "Sample 1").
+  if (!is.null(id_col) && length(id_col) == 1 && !is.na(id_col) &&
+      !id_col %in% c("", "None") && id_col %in% colnames(raw_data) &&
+      id_col != type_col && type_col %in% colnames(raw_data)) {
+    ctrl_labels <- c(nsb_label, b0_label, blank_label, std_label,
+                     "QC_Low", "QC_Mid", "QC_High")
+    ty <- trimws(as.character(raw_data[[type_col]]))
+    ids <- trimws(as.character(raw_data[[id_col]]))
+    use_id <- !is.na(ty) & ty != "" & !(ty %in% ctrl_labels) &
+      !is_standard_type(ty, std_label) & !is.na(ids) & ids != ""
+    if (any(use_id)) {
+      raw_data[[type_col]] <- ifelse(use_id, ids, as.character(raw_data[[type_col]]))
+      message("  Sample IDs from column '", id_col, "' applied to ", sum(use_id), " wells")
+    }
+  }
+
   # Map to standardized column names
   data <- map_column_names(
     raw_data, well_col, type_col, conc_col, od_col,
@@ -126,6 +144,9 @@ analyze_elisa <- function(
   message("\n[3/8] Cleaning data...")
   data <- clean_data(data, remove_unlabeled)
   message("  ", nrow(data), " rows after cleaning")
+
+  # Numbered/lettered standards ("Standard 1".."Standard 6") -> one label
+  data <- normalize_standard_labels(data, std_label)
 
   # STEP 3.5: Per-plate B/B0% normalization (removes plate-to-plate OD variation)
   if (isTRUE(normalize_per_plate)) {
@@ -411,6 +432,7 @@ analyze_elisa <- function(
     qc_summary = qc_summary,
 
     # Metadata
+    conc_units_detected = detect_conc_units(conc_col),
     assay_type = final_assay_type,
     assay_detection = assay_result$detection_result,
     std_range = std_range,

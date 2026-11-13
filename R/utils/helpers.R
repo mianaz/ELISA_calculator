@@ -286,3 +286,54 @@ print_message <- function(..., level = "INFO") {
   timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
   message(sprintf("[%s] %s: %s", timestamp, level, paste(..., collapse = " ")))
 }
+
+#' Does a Sample Type value denote a standard?
+#'
+#' Matches the configured standard label exactly ("Standard") and numbered or
+#' lettered variants such as "Standard 1", "Standard_A", "Standard6", "Std 3".
+#' Words that merely start with the label ("Standard Control") do not match.
+#'
+#' @param type Character vector of Sample Type values
+#' @param std_label Configured standard label
+#' @return Logical vector
+is_standard_type <- function(type, std_label = "Standard") {
+  type <- trimws(as.character(type))
+  esc <- gsub("([][{}()+*^$|\\\\?.])", "\\\\\\1", std_label)
+  pat <- paste0("^(", esc, "|Std|Standard)([[:space:]_.:#-]*[A-Za-z0-9]{1,3})?$")
+  !is.na(type) & (type == std_label | grepl(pat, type, ignore.case = TRUE))
+}
+
+#' Collapse numbered/lettered standard labels to the single standard label
+#'
+#' The analysis pipeline identifies standards by one exact label. Exports that
+#' number each standard ("Standard 1" ... "Standard 6") would otherwise match
+#' nothing, silently dropping the 0 standard and treating it as a sample.
+#'
+#' @param data Data frame with standardized column names
+#' @param std_label Configured standard label
+#' @return Data frame with standards relabelled to std_label
+normalize_standard_labels <- function(data, std_label = "Standard") {
+  if (!COL_TYPE %in% colnames(data)) return(data)
+  type <- as.character(data[[COL_TYPE]])
+  idx <- is_standard_type(type, std_label) & type != std_label
+  if (any(idx)) {
+    message("  Collapsed ", sum(idx), " wells (", length(unique(type[idx])),
+            " labels, e.g. '", type[idx][1], "') into '", std_label, "'")
+    type[idx] <- std_label
+    data[[COL_TYPE]] <- type
+  }
+  data
+}
+
+#' Pick the unit string out of a column header such as "Concentration (ng/ml)"
+#' @param col_name Column header
+#' @return Unit with conventional capitalisation ("ng/mL"), or NULL
+detect_conc_units <- function(col_name) {
+  if (is.null(col_name) || length(col_name) == 0 || is.na(col_name)) return(NULL)
+  m <- regmatches(col_name, regexpr("\\(([^)]*/[^)]*)\\)", col_name))
+  if (length(m) == 0) return(NULL)
+  u <- gsub("^\\(|\\)$", "", m)
+  u <- gsub("ml$", "mL", u, ignore.case = TRUE)
+  u <- sub("^ug", "\u00b5g", u)
+  trimws(u)
+}

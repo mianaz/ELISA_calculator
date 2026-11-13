@@ -283,6 +283,12 @@ create_ui <- function() {
               column(4, selectInput("od_corr_col", "Corrected OD Column (Optional)", choices = NULL)),
               column(4, checkboxInput("use_corrected", "Use Corrected OD Values", value = FALSE))
             ),
+            fluidRow(
+              column(4, selectInput("id_col", "Sample ID Column (Optional)", choices = "None",
+                                    selected = "None")),
+              column(8, helpText("If set, sample wells are named by this column (e.g. subject ID)",
+                                 "instead of the Sample Type column. Standards and controls are unaffected."))
+            ),
 
             hr(),
             h5("Control Labels"),
@@ -474,6 +480,12 @@ create_ui <- function() {
               ),
               hr(),
               textInput("plotTitle",  "Plot Title",   placeholder = "Auto-generated"),
+              selectInput("concUnits", "Concentration units",
+                          choices = c("Auto (from column header)" = "auto",
+                                      "pg/mL" = "pg/mL", "ng/mL" = "ng/mL",
+                                      "\u00b5g/mL" = "\u00b5g/mL", "None" = "none"),
+                          selected = "auto"),
+              checkboxInput("showStdLabels", "Label standards A, B, C\u2026", value = TRUE),
               textInput("plotXLabel", "X Axis Label", placeholder = "Auto-generated"),
               textInput("plotYLabel", "Y Axis Label", placeholder = "Auto-generated"),
               fluidRow(

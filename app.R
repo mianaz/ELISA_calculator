@@ -47,7 +47,7 @@ render_plate_html <- function(well_type_map, well_od_map, input_obj,
 
   classify_well <- function(type) {
     if (is.null(type) || is.na(type) || type == "" || type == "Empty") return("empty")
-    if (type == std_label || type == "Standard") return("std")
+    if (is_standard_type(type, std_label)) return("std")
     if (type == blank_label || type == "Blank") return("blank")
     if (type %in% c(nsb_label, b0_label, "NSB", "B0", "QC_Low", "QC_Mid", "QC_High")) return("control")
     return("sample")
@@ -335,6 +335,15 @@ server <- function(input, output, session) {
     updateSelectInput(session, "conc_col", choices = column_names, selected = conc_sel)
     updateSelectInput(session, "od_col",   choices = column_names, selected = od_sel)
     updateSelectInput(session, "od_corr_col", choices = c("None", column_names), selected = od_corr_sel)
+
+    # Optional Sample ID column (subject IDs); stays "None" unless one is found
+    id_sel <- "None"
+    for (pat in c("Sample ID", "SampleID", "Sample_ID", "Subject ID", "SubjectID", "Subject_ID", "Subject", "Participant")) {
+      hit <- which(tolower(column_names) == tolower(pat))
+      if (length(hit) == 0) hit <- which(startsWith(tolower(column_names), tolower(pat)))
+      if (length(hit) > 0) { id_sel <- column_names[hit[1]]; break }
+    }
+    updateSelectInput(session, "id_col", choices = c("None", column_names), selected = id_sel)
   }
 
   # Set flags for UI conditional elements
@@ -479,7 +488,8 @@ server <- function(input, output, session) {
           weight_type = input$weight_type %||% "none",
           models_to_fit = models,
           calculate_limits = input$calculate_limits %||% TRUE,
-          normalize_per_plate = input$normalize_per_plate %||% FALSE
+          normalize_per_plate = input$normalize_per_plate %||% FALSE,
+          id_col = input$id_col
         )
 
         incProgress(0.5, detail = "Generating outputs")
@@ -1142,7 +1152,9 @@ server <- function(input, output, session) {
       plot_title                 = input$plotTitle,
       x_title                    = input$plotXLabel,
       y_title                    = input$plotYLabel,
-      color_samples_individually = input$colorSamplesIndividually  %||% FALSE
+      color_samples_individually = input$colorSamplesIndividually  %||% FALSE,
+      conc_units                 = input$concUnits                 %||% "auto",
+      show_std_labels            = input$showStdLabels             %||% TRUE
     )
   })
   
@@ -1374,7 +1386,7 @@ server <- function(input, output, session) {
       nsb_label <- input$nsb_label %||% "NSB"
       b0_label <- input$b0_label %||% "B0"
 
-      n_standards <- sum(type_counts[names(type_counts) == std_label], na.rm = TRUE)
+      n_standards <- sum(type_counts[is_standard_type(names(type_counts), std_label)], na.rm = TRUE)
       n_blanks <- sum(type_counts[names(type_counts) == blank_label], na.rm = TRUE)
       n_controls <- sum(type_counts[names(type_counts) %in% c(nsb_label, b0_label)], na.rm = TRUE)
       n_samples <- nrow(data) - n_standards - n_blanks - n_controls
@@ -1599,6 +1611,8 @@ server <- function(input, output, session) {
       x_title                    = x_title,
       y_title                    = y_title,
       color_samples_individually = color_samples_individually,
+      conc_units                 = input$concUnits      %||% "auto",
+      show_std_labels            = input$showStdLabels  %||% TRUE,
       return_ggplot              = TRUE
     )
   }
